@@ -101,7 +101,7 @@ const STRIP=["Container 1","Container 2","HB 1a","HB 1b","HB 2a","HB 2b","Leftov
 function esc(s){return (s==null?"":String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function dispName(s){return s.type!=="Single"?((s.gen||s.ser||"")||""):[s.gen,s.ser,s.col].filter(Boolean).join(" ");}
 function scoreColor(a){return a==null?null:a>=4?'var(--good)':a>=3?'var(--mid)':'var(--bad)';}
-function driveThumb(u){const m=String(u).match(/\/d\/([^/]+)/);return m?('https://drive.google.com/thumbnail?id='+m[1]+'&sz=w300'):u;}
+function driveThumb(u){const m=String(u).match(/\/d\/([^/]+)/);return m?('https://lh3.googleusercontent.com/d/'+m[1]+'=w400'):u;}
 function latestAvg(sku){const r=RATINGS[sku];return r&&r.length?r[0].avg:null;}
 function skusFor(locs){let a=[];(locs||[]).forEach(l=>{(BEDS[l]||[]).forEach(s=>a.push(s));});return a;}
 function bedFill(locs){const sk=skusFor(locs);let rated=0;sk.forEach(s=>{if(latestAvg(s.sku)!=null)rated++;});
