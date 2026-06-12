@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>OSU Trial — record a plant</title>
+<style>
+:root{--green:#3f7d46;--green-d:#2e5e34;--card:#fff;--bg:#f4f6f2;--line:#dfe5da;--ink:#243024;--muted:#6b776b}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--green);color:#fff;padding:18px 16px 16px}
+.sku{font-size:12px;opacity:.85;letter-spacing:.5px}
+.name{font-size:24px;font-weight:800;margin-top:2px}
+.meta{font-size:13px;opacity:.9;margin-top:3px}
+.wrap{padding:14px;max-width:560px;margin:0 auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px;margin-bottom:13px}
+.card h2{margin:0 0 10px;font-size:15px}
+.hint{color:var(--muted);font-size:13px;margin:0 0 12px}
+label.fld{display:block;font-weight:600;font-size:13px;margin:12px 0 5px}
+input[type=number],input[type=date],textarea,select{width:100%;padding:13px;font-size:17px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink)}
+textarea{min-height:64px;resize:vertical}
+.big{font-size:22px;font-weight:700;text-align:center}
+.unit{color:var(--muted);font-size:13px;margin-top:4px}
+.last{background:#eef4ea;border:1px solid #d8e6d4;border-radius:10px;padding:10px 12px;font-size:13px;color:var(--green-d)}
+.photo-btn{display:inline-block;background:#eef4ea;border:1px dashed var(--green);color:var(--green-d);border-radius:10px;padding:12px 14px;font-weight:600;cursor:pointer}
+.photo-btn input{display:none}
+#thumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+#thumbs .t{position:relative}
+#thumbs img{width:64px;height:64px;object-fit:cover;border-radius:8px}
+#thumbs span{position:absolute;top:-7px;right:-7px;background:#c0392b;color:#fff;width:20px;height:20px;border-radius:50%;text-align:center;line-height:20px;font-size:13px;cursor:pointer}
+.submit{position:sticky;bottom:0;background:linear-gradient(transparent,var(--bg) 30%);padding:14px}
+.submit button{width:100%;padding:16px;font-size:17px;font-weight:800;border:0;border-radius:12px;background:var(--green);color:#fff}
+.submit button:disabled{background:#aebfad}
+.back{display:inline-block;color:#fff;text-decoration:none;font-size:13px;opacity:.9;margin-bottom:8px}
+#toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#243024;color:#fff;padding:12px 18px;border-radius:10px;font-size:15px;opacity:0;transition:.2s;white-space:pre-line;text-align:center;z-index:9}
+#toast.show{opacity:.97}
+.err{padding:30px 18px}
+.nextrow{display:flex;gap:10px;margin-top:10px}
+.nextrow a{flex:1;text-align:center;padding:12px;border-radius:10px;border:1px solid var(--line);background:#fff;color:var(--green-d);text-decoration:none;font-weight:600}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast"></div>
+<script>
+/* OSU endpoint — set after deploying osu_backend.gs as a web app */
+const ENDPOINT = "https://script.google.com/macros/s/AKfycbyP2mxfUEIKho8sBuCrg8Yblv3vA-H9tQiVTaRAFzaKvnhoQpx1TJ7xnqYUComYT6jQ/exec";
+const RATERS = ["Mason","Audrey","Big G"];
+const RATES = [0,25,50,75,100,200];
+
+function qs(k){return new URLSearchParams(location.search).get(k);}
+function esc(s){return (s==null?"":String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function ppmFor(n){return RATES[Math.floor((n-1)/8)]+"ppm";}
+
+const plant = parseInt(qs("plant")||"",10);
+const app = document.getElementById("app");
+let photos = [];
+
+if(!(plant>=1 && plant<=48)){
+  app.innerHTML='<div class="err"><h2>Pick a plant</h2><p>Open this from the map: tap Bed 23, then a marigold plant (1–48).</p></div>';
+}else{
+  render();
+}
+
+function render(){
+  const ppm = ppmFor(plant);
+  app.innerHTML = `
+  <header>
+    <a class="back" href="index.html">‹ Map</a>
+    <div class="sku">BED 23 · OSU PGR TRIAL</div>
+    <div class="name">Marigold — Plant ${plant}</div>
+    <div class="meta">Collate drench · ${ppm}</div>
+  </header>
+  <div class="wrap">
+    <div id="lastBox"></div>
+    <div class="card">
+      <h2>Height</h2>
+      <p class="hint">Measure to the top of the plant.</p>
+      <input type="number" id="height" class="big" inputmode="decimal" step="0.1" min="0" placeholder="0.0">
+      <div class="unit">centimetres (cm)</div>
+    </div>
+    <div class="card">
+      <h2>Flowering date</h2>
+      <p class="hint">Only when it first flowers — leave blank otherwise.</p>
+      <input type="date" id="flower">
+      <button type="button" id="flowToday" class="photo-btn" style="margin-top:10px">Flowered today</button>
+    </div>
+    <div class="card">
+      <h2>Photo &amp; notes</h2>
+      <label class="fld" for="rater">Recorded by</label>
+      <select id="rater">${RATERS.map(r=>`<option>${esc(r)}</option>`).join("")}</select>
+      <label class="fld">Photo (optional)</label>
+      <label class="photo-btn">📷 Add photo<input type="file" accept="image/*" capture="environment" id="photoIn" multiple></label>
+      <div id="thumbs"></div>
+      <label class="fld" for="note">Notes (optional)</label>
+      <textarea id="note" placeholder="Anything worth recording"></textarea>
+    </div>
+  </div>
+  <div class="submit"><button id="go" disabled>Submit Plant ${plant}</button></div>`;
+
+  document.getElementById("height").addEventListener("input", refresh);
+  document.getElementById("flowToday").addEventListener("click", ()=>{
+    document.getElementById("flower").value = new Date().toISOString().slice(0,10);
+  });
+  document.getElementById("photoIn").addEventListener("change", addPhotos);
+  document.getElementById("go").addEventListener("click", submit);
+  loadLast();
+}
+
+function refresh(){
+  const h = parseFloat(document.getElementById("height").value);
+  document.getElementById("go").disabled = !(h>0);
+}
+function addPhotos(e){
+  [...e.target.files].forEach(f=>photos.push({file:f,url:URL.createObjectURL(f)}));
+  e.target.value=""; drawThumbs();
+}
+function drawThumbs(){
+  const t=document.getElementById("thumbs");
+  t.innerHTML=photos.map((p,i)=>`<div class="t"><img src="${p.url}"><span data-i="${i}">×</span></div>`).join("");
+  t.querySelectorAll("span").forEach(s=>s.addEventListener("click",()=>{photos.splice(+s.dataset.i,1);drawThumbs();}));
+}
+function toast(m,ms){const t=document.getElementById("toast");t.textContent=m;t.classList.add("show");if(ms)setTimeout(()=>t.classList.remove("show"),ms);}
+function b64(f){return new Promise(r=>{const x=new FileReader();x.onload=()=>r(x.result.split(",")[1]);x.readAsDataURL(f);});}
+
+async function loadLast(){
+  if(!ENDPOINT||ENDPOINT.indexOf("__")===0) return;
+  try{
+    const r=await fetch(ENDPOINT+"?action=last&plant="+plant);
+    const j=await r.json();
+    if(j&&j.found&&j.last){
+      const fd=s=>{s=String(s||"");return s.indexOf("T")>0?s.slice(0,10):s;};
+      const f=j.last.flower?(" · flowered "+esc(fd(j.last.flower))):"";
+      document.getElementById("lastBox").innerHTML=
+        `<div class="last">Last: <b>${esc(j.last.height)} cm</b> on ${esc(fd(j.last.date))}${f}</div>`;
+    }
+  }catch(e){}
+}
+
+async function submit(){
+  const btn=document.getElementById("go"); btn.disabled=true;
+  const payload={
+    plant:plant, ppm:ppmFor(plant),
+    height:document.getElementById("height").value,
+    flowerDate:document.getElementById("flower").value,
+    rater:document.getElementById("rater").value,
+    notes:document.getElementById("note").value,
+    date:new Date().toISOString().slice(0,10)
+  };
+  toast("Saving…");
+  try{
+    payload.photos=await Promise.all(photos.map(async p=>({name:p.file.name,type:p.file.type,data:await b64(p.file)})));
+    await fetch(ENDPOINT,{method:"POST",body:JSON.stringify(payload),headers:{"Content-Type":"text/plain;charset=utf-8"}});
+    showDone();
+  }catch(e){
+    toast("⚠ Couldn't save — check signal and retry",3500); btn.disabled=false;
+  }
+}
+
+function showDone(){
+  const next = plant<48 ? plant+1 : null;
+  const prev = plant>1 ? plant-1 : null;
+  app.innerHTML=`<header><div class="sku">BED 23 · OSU PGR TRIAL</div>
+    <div class="name">✓ Plant ${plant} saved</div></header>
+    <div class="wrap"><div class="card"><p>Recorded for Plant ${plant} (${ppmFor(plant)}).</p>
+    <div class="nextrow">
+      ${prev?`<a href="osu.html?plant=${prev}">‹ Plant ${prev}</a>`:""}
+      ${next?`<a href="osu.html?plant=${next}">Plant ${next} ›</a>`:""}
+    </div>
+    <div class="nextrow"><a href="index.html">Back to map</a></div>
+    </div></div>`;
+}
+</script>
+</body>
+</html>

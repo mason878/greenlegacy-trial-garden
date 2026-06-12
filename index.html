@@ -151,14 +151,14 @@ function renderPlan(){
  document.getElementById('count').textContent=Object.keys(RATINGS).length+' / 714 rated';
 }
 function openOSU(){const p=document.getElementById('panel');
- const link="https://grlgc.sharepoint.com/:x:/s/TrialGarden/IQAYVgjNEl1WTZxrZczjLDTlAXxrGvy35clvx8oDmZA4QCA?e=NE5dvr";
- const groups=[["0ppm","1\u20138"],["25ppm","9\u201316"],["50ppm","17\u201324"],["75ppm","25\u201332"],["100ppm","33\u201340"],["200ppm","41\u201348"]];
- let h='<div class="phead"><div><div class="ttl">Bed 23 \u2014 OSU PGR Trial</div><div class="st">Collate drench \u00b7 Garrett Owen (OSU)</div></div><button class="x" onclick="closeSheet()">\u00d7</button></div><div class="detail">';
- h+='<p class="vm">University trial \u2014 data is collected by hand on the OSU sheet, not the 0\u20135 rating form.</p>';
- h+='<div class="comp"><b>Marigold (48 plants):</b> record <b>height (cm)</b> every other week and the <b>flowering date</b> of each plant.<br><b>Torenia &amp; Angelonia:</b> no data collection.</div>';
- h+='<a class="ratebtn" href="'+link+'" target="_blank" rel="noopener">Open OSU data sheet \u203a</a>';
- h+='<div class="h3">Marigolds by rate</div>';
- groups.forEach(g=>{h+='<div class="pass"><div class="top"><b>'+g[0]+'</b><span class="who">\u00b7 plants '+g[1]+'</span></div></div>';});
+ const sheet="https://docs.google.com/spreadsheets/d/15IQ9kYNR-kAukX1J1hAgPHItan_58J-rxqhAcyyQpe8/edit";
+ const rates=[["0ppm",1],["25ppm",9],["50ppm",17],["75ppm",25],["100ppm",33],["200ppm",41]];
+ let h='<div class="phead"><div><div class="ttl">Bed 23 \u2014 OSU PGR Trial</div><div class="st">Collate drench \u00b7 tap a plant to record</div></div><button class="x" onclick="closeSheet()">\u00d7</button></div><div class="detail">';
+ h+='<p class="vm"><b>Marigolds only</b> \u2014 tap a plant to record height (cm), flowering date &amp; a photo. Torenia &amp; Angelonia: no data.</p>';
+ rates.forEach(r=>{h+='<div class="h3">'+r[0]+'</div><div class="chips">';
+   for(let i=0;i<8;i++){const n=r[1]+i;h+='<a class="chip" style="text-decoration:none;color:inherit" href="osu.html?plant='+n+'">Plant <b>'+n+'</b></a>';}
+   h+='</div>';});
+ h+='<a class="ratebtn" href="'+sheet+'" target="_blank" rel="noopener">View all OSU data (Google Sheet) \u203a</a>';
  h+='</div>';p.innerHTML=h;openSheet();}
 function openBed(name,locs){const sk=skusFor(locs);const p=document.getElementById('panel');
  let h='<div class="phead"><div><div class="ttl">'+esc(name)+'</div><div class="st">'+sk.length+' varieties</div></div><button class="x" onclick="closeSheet()">×</button></div><div class="plist">';
