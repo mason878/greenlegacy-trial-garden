@@ -74,7 +74,7 @@ function render(){
   <div class="wrap">
     <div id="lastBox"></div>
     <div class="card">
-      <h2>Height</h2>
+      <h2>Height <span style="font-weight:400;color:var(--muted);font-size:13px">(optional)</span></h2>
       <p class="hint">Measure to the top of the plant.</p>
       <input type="number" id="height" class="big" inputmode="decimal" step="0.1" min="0" placeholder="0.0">
       <div class="unit">centimetres (cm)</div>
@@ -97,7 +97,6 @@ function render(){
     </div>
   </div>
   <div class="submit"><button id="go" disabled>Submit Plant ${plant}</button></div>`;
-<h2>Height <span style="font-weight:400;color:var(--muted);font-size:13px">(optional)</span></h2>
   document.getElementById("height").addEventListener("input", refresh);
   document.getElementById("flower").addEventListener("change", refresh);
   document.getElementById("flowToday").addEventListener("click", ()=>{
