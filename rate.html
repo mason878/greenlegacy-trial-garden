@@ -133,7 +133,7 @@ function render(){
       <div id="thumbs"></div>
     </div>
   </div>
-  <div class="submit"><button id="go" disabled>Submit rating</button></div>`;
+  <div class="submit"><button id="go">Submit rating</button></div>`;
 
   CRIT.forEach(c=>wireScale(c[0]));
   document.getElementById("photoIn").addEventListener("change",addPhotos);
@@ -161,7 +161,8 @@ function refresh(){
   const avgEl=document.getElementById("avgOut");
   if(vals.length){avgEl.textContent=(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2);}
   else avgEl.textContent="—";
-  document.getElementById("go").disabled = vals.length<4;
+  // Allow submit with 0 ratings (photo-only), but if any rating is set, require all 4
+  document.getElementById("go").disabled = vals.length>0 && vals.length<4;
 }
 function addPhotos(e){
   [...e.target.files].forEach(f=>{
@@ -209,8 +210,9 @@ function compressPhoto(f){return new Promise(res=>{
 
 async function submit(){
   const btn=document.getElementById("go");btn.disabled=true;
-  const vals=Object.values(scores);
-  const avg=(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2);
+  const ratedVals=Object.values(scores).filter(v=>v!==null);
+  const hasRatings=ratedVals.length===4;
+  const avg=hasRatings?(ratedVals.reduce((a,b)=>a+b,0)/4).toFixed(2):null;
   const payload={
     sku:id,loc:rec.loc,type:rec.type,sup:rec.sup,gen:rec.gen,ser:rec.ser,col:rec.col,
     date:new Date().toISOString(),rater:document.getElementById("rater").value,
@@ -226,7 +228,7 @@ async function submit(){
   }else{
     console.log("RATING (no endpoint set):",payload);
   }
-  toast("✓ "+id+" saved\nAvg "+avg,0);
+  toast("✓ "+id+" saved"+(avg?"\nAvg "+avg:""),0);
   setTimeout(()=>{
     window.location.href='index.html?bed='+encodeURIComponent(rec.loc);
   },1400);
