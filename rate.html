@@ -123,7 +123,7 @@ function render(){
     <div class="card">
       <h2>Notes & Photo</h2>
       <label class="fld" for="rater">Rated by</label>
-      <select id="rater">${RATERS.map(r=>`<option>${esc(r)}</option>`).join("")}</select>
+      <select id="rater"><option value="">— select —</option>${RATERS.map(r=>`<option>${esc(r)}</option>`).join("")}</select>
       <label class="fld" for="note">Notes (optional)</label>
       <textarea id="note" placeholder="Anything worth recording — reversions, splitting, damage…"></textarea>
       <label class="fld">Photos (optional)</label>
