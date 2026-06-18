@@ -97,10 +97,12 @@ function render(){
     </div>
   </div>
   <div class="submit"><button id="go" disabled>Submit Plant ${plant}</button></div>`;
-
+<h2>Height <span style="font-weight:400;color:var(--muted);font-size:13px">(optional)</span></h2>
   document.getElementById("height").addEventListener("input", refresh);
+  document.getElementById("flower").addEventListener("change", refresh);
   document.getElementById("flowToday").addEventListener("click", ()=>{
     document.getElementById("flower").value = new Date().toISOString().slice(0,10);
+    refresh();
   });
   document.getElementById("photoIn").addEventListener("change", addPhotos);
   document.getElementById("go").addEventListener("click", submit);
@@ -109,7 +111,8 @@ function render(){
 
 function refresh(){
   const h = parseFloat(document.getElementById("height").value);
-  document.getElementById("go").disabled = !(h>0);
+  const f = document.getElementById("flower").value;
+  document.getElementById("go").disabled = !(h > 0 || f || photos.length > 0);
 }
 function addPhotos(e){
   [...e.target.files].forEach(f=>photos.push({file:f,url:URL.createObjectURL(f)}));
@@ -119,6 +122,7 @@ function drawThumbs(){
   const t=document.getElementById("thumbs");
   t.innerHTML=photos.map((p,i)=>`<div class="t"><img src="${p.url}"><span data-i="${i}">×</span></div>`).join("");
   t.querySelectorAll("span").forEach(s=>s.addEventListener("click",()=>{photos.splice(+s.dataset.i,1);drawThumbs();}));
+refresh();
 }
 function toast(m,ms){const t=document.getElementById("toast");t.textContent=m;t.classList.add("show");if(ms)setTimeout(()=>t.classList.remove("show"),ms);}
 function b64(f){return new Promise(r=>{const x=new FileReader();x.onload=()=>r(x.result.split(",")[1]);x.readAsDataURL(f);});}
