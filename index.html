@@ -199,5 +199,7 @@ async function loadRatings(){const st=document.getElementById('status');st.textC
   for(const k in RATINGS)RATINGS[k].sort((a,b)=>(a.date<b.date?1:-1));st.textContent='';
  }catch(e){st.textContent='Offline — showing varieties only.';}
  renderPlan();}
+ (function(){const b=new URLSearchParams(location.search).get('bed');if(b&&BEDS[b])openBed(b,[b]);})();
 renderPlan();loadRatings();
+(function(){const b=new URLSearchParams(location.search).get('bed');if(b&&BEDS[b])openBed(b,[b]);})();
 </script></body></html>
