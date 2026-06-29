@@ -1,0 +1,236 @@
+/* ============================================================
+   tg-queue.js — Offline submission queue for the Trial Garden forms
+   ------------------------------------------------------------
+   WHAT IT DOES
+   - Transparently intercepts the POST that rate.html / osu.html send to
+     the Google Apps Script endpoint (script.google.com/macros/.../exec).
+   - Saves every submission to the device first (IndexedDB) so it can NEVER
+     be lost — even if signal drops, the tab closes, or the phone sleeps.
+   - If the connection is good, it sends immediately (no change you'd notice).
+   - If the connection is poor/offline, the submission waits in a queue and
+     auto-retries in the background while the user keeps scanning plants.
+   - Shows a small "queued" badge in the corner with the count waiting.
+
+   HOW IT HOOKS IN
+   - It overrides window.fetch and only touches POSTs to the Apps Script
+     endpoint. Every other request (the GET that loads last ratings, the map
+     data, etc.) passes straight through untouched.
+   - No change to Audrey's submit() logic is required — just load this file
+     with a single <script> tag in <head>.
+
+   NOTES
+   - Sends use mode:'no-cors'. Apps Script does not return CORS headers, so the
+     browser can't read the response body; a resolved no-cors fetch means the
+     request reached the server, a rejected one means no connection. That is the
+     same delivery guarantee the old fire-and-forget code relied on, now with
+     persistence + retry added on top.
+   - Each queued item gets a unique submissionId (added to the payload). The
+     backend ignores it today, but it's there so a dedup check can be added to
+     the Apps Script later for bulletproof no-duplicate guarantees.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  var DB_NAME = "tgQueueDB";
+  var STORE = "submissions";
+  var ENDPOINT_RE = /script\.google\.com\/macros\//i;
+  var RETRY_MS = 20000;          // background retry interval while items remain
+  var sending = {};              // ids currently in-flight on this page
+  var dbPromise = null;
+
+  /* ---------- IndexedDB helpers ---------- */
+  function openDB() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise(function (resolve, reject) {
+      var req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!db.objectStoreNames.contains(STORE)) {
+          db.createObjectStore(STORE, { keyPath: "id" });
+        }
+      };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+    });
+    return dbPromise;
+  }
+
+  function tx(mode) {
+    return openDB().then(function (db) {
+      return db.transaction(STORE, mode).objectStore(STORE);
+    });
+  }
+
+  function putItem(item) {
+    return tx("readwrite").then(function (store) {
+      return new Promise(function (resolve, reject) {
+        var r = store.put(item);
+        r.onsuccess = function () { resolve(); };
+        r.onerror = function () { reject(r.error); };
+      });
+    });
+  }
+
+  function deleteItem(id) {
+    return tx("readwrite").then(function (store) {
+      return new Promise(function (resolve) {
+        var r = store.delete(id);
+        r.onsuccess = function () { resolve(); };
+        r.onerror = function () { resolve(); };
+      });
+    });
+  }
+
+  function getAll() {
+    return tx("readonly").then(function (store) {
+      return new Promise(function (resolve) {
+        var r = store.getAll();
+        r.onsuccess = function () { resolve(r.result || []); };
+        r.onerror = function () { resolve([]); };
+      });
+    });
+  }
+
+  /* ---------- queueing ---------- */
+  function uuid() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return "id-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+  }
+
+  function enqueue(url, body) {
+    var bodyStr = typeof body === "string" ? body : "";
+    var id = uuid();
+    // Stamp a submissionId into the JSON payload (future-proofs backend dedup).
+    try {
+      var obj = JSON.parse(bodyStr);
+      if (obj && typeof obj === "object") {
+        obj.submissionId = id;
+        bodyStr = JSON.stringify(obj);
+      }
+    } catch (e) { /* not JSON — store as-is */ }
+    return putItem({
+      id: id,
+      url: url,
+      body: bodyStr,
+      ts: Date.now(),
+      attempts: 0
+    }).then(updateBadge);
+  }
+
+  /* ---------- sending ---------- */
+  function sendItem(item) {
+    if (sending[item.id]) return Promise.resolve();
+    sending[item.id] = true;
+    return ORIG_FETCH(item.url, {
+      method: "POST",
+      mode: "no-cors",
+      body: item.body,
+      headers: { "Content-Type": "text/plain;charset=utf-8" }
+    }).then(function () {
+      // Resolved => request reached the server. Safe to drop from the queue.
+      return deleteItem(item.id);
+    }).catch(function () {
+      // Rejected => no connection. Keep it; bump attempts for visibility.
+      item.attempts = (item.attempts || 0) + 1;
+      return putItem(item);
+    }).then(function () {
+      delete sending[item.id];
+      updateBadge();
+    });
+  }
+
+  var flushing = false;
+  function flush() {
+    if (flushing) return;
+    if (!navigator.onLine) { updateBadge(); return; }
+    flushing = true;
+    getAll().then(function (items) {
+      items.sort(function (a, b) { return a.ts - b.ts; });
+      // Send sequentially so a weak connection isn't overwhelmed.
+      var chain = Promise.resolve();
+      items.forEach(function (item) {
+        chain = chain.then(function () {
+          if (!navigator.onLine) return;
+          return sendItem(item);
+        });
+      });
+      return chain;
+    }).then(function () {
+      flushing = false;
+      updateBadge();
+    }).catch(function () {
+      flushing = false;
+    });
+  }
+
+  /* ---------- fetch override ---------- */
+  var ORIG_FETCH = window.fetch ? window.fetch.bind(window) : null;
+  if (ORIG_FETCH) {
+    window.fetch = function (input, init) {
+      try {
+        var url = typeof input === "string" ? input : (input && input.url) || "";
+        var method = ((init && init.method) ||
+                      (input && input.method) || "GET").toUpperCase();
+        if (method === "POST" && ENDPOINT_RE.test(url)) {
+          var body = init && init.body;
+          // Persist first, then try to send; return immediately so the
+          // form's UI proceeds exactly as before.
+          enqueue(url, body).then(flush);
+          return Promise.resolve(new Response(null, { status: 202 }));
+        }
+      } catch (e) { /* fall through to real fetch */ }
+      return ORIG_FETCH(input, init);
+    };
+  }
+
+  /* ---------- badge ---------- */
+  var badgeEl = null;
+  function ensureBadge() {
+    if (badgeEl) return badgeEl;
+    badgeEl = document.createElement("div");
+    badgeEl.id = "tgQueueBadge";
+    badgeEl.style.cssText = [
+      "position:fixed", "bottom:12px", "right:12px", "z-index:99999",
+      "background:#b45309", "color:#fff", "font:600 13px/1.2 system-ui,sans-serif",
+      "padding:8px 12px", "border-radius:20px", "box-shadow:0 2px 8px rgba(0,0,0,.3)",
+      "cursor:pointer", "display:none", "max-width:70vw"
+    ].join(";");
+    badgeEl.title = "Tap to retry now";
+    badgeEl.addEventListener("click", flush);
+    (document.body || document.documentElement).appendChild(badgeEl);
+    return badgeEl;
+  }
+
+  function updateBadge() {
+    return getAll().then(function (items) {
+      var el = ensureBadge();
+      var n = items.length;
+      if (n === 0) { el.style.display = "none"; return; }
+      var online = navigator.onLine;
+      el.style.background = online ? "#b45309" : "#991b1b";
+      el.textContent = (online ? "↻ Uploading… " : "⚠ Offline · ")
+        + n + " waiting";
+      el.style.display = "block";
+    });
+  }
+
+  /* ---------- triggers ---------- */
+  function init() {
+    ensureBadge();
+    updateBadge();
+    flush();
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+  window.addEventListener("online", flush);
+  window.addEventListener("focus", flush);
+  setInterval(function () {
+    getAll().then(function (items) { if (items.length) flush(); });
+  }, RETRY_MS);
+
+  // Expose a tiny API for manual use / debugging.
+  window.TGQueue = { flush: flush, pending: getAll };
+})();
