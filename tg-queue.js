@@ -118,24 +118,47 @@
   }
 
   /* ---------- sending ---------- */
+  // Ask the backend (readable GET) whether this submissionId already saved.
+  // GET responses from the Apps Script web app ARE readable (CORS-enabled),
+  // unlike the no-cors POST — so this is how we get a real save confirmation.
+  function isSaved(item) {
+    var base = item.url.split("?")[0];
+    var check = base + "?action=check&id=" + encodeURIComponent(item.id);
+    return ORIG_FETCH(check, { method: "GET" })
+      .then(function (r) { return r.ok ? r.json() : { saved: false }; })
+      .then(function (j) { return !!(j && j.saved); })
+      .catch(function () { return false; }); // can't confirm -> treat as not saved
+  }
+
   function sendItem(item) {
     if (sending[item.id]) return Promise.resolve();
     sending[item.id] = true;
-    return ORIG_FETCH(item.url, {
-      method: "POST",
-      mode: "no-cors",
-      body: item.body,
-      headers: { "Content-Type": "text/plain;charset=utf-8" }
-    }).then(function () {
-      // Resolved => request reached the server. Safe to drop from the queue.
-      return deleteItem(item.id);
-    }).catch(function () {
-      // Rejected => no connection. Keep it; bump attempts for visibility.
-      item.attempts = (item.attempts || 0) + 1;
-      return putItem(item);
+    // 1) Confirm-first: if it already landed on a previous attempt, just drop it.
+    //    This prevents re-uploading photos and prevents duplicate rows.
+    return isSaved(item).then(function (saved) {
+      if (saved) return deleteItem(item.id);
+      // 2) Not saved yet -> send it (no-cors; can't read the reply here).
+      return ORIG_FETCH(item.url, {
+        method: "POST",
+        mode: "no-cors",
+        body: item.body,
+        headers: { "Content-Type": "text/plain;charset=utf-8" }
+      }).then(function () {
+        // Delivered to the server, but we do NOT delete yet. We keep the item
+        // and let the NEXT flush confirm via isSaved() before removing it, so
+        // a submission is never dropped until we've verified it actually saved.
+        item.attempts = (item.attempts || 0) + 1;
+        return putItem(item);
+      }).catch(function () {
+        // No connection. Keep it; bump attempts for visibility.
+        item.attempts = (item.attempts || 0) + 1;
+        return putItem(item);
+      });
     }).then(function () {
       delete sending[item.id];
       updateBadge();
+    }).catch(function () {
+      delete sending[item.id];
     });
   }
 
