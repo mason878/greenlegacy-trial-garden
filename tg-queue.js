@@ -37,6 +37,7 @@
   var RETRY_MS = 20000;          // background retry interval while items remain
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
+  var lastN = 0, savedTimer = null;  // for the "all saved" confirmation
 
   /* ---------- IndexedDB helpers ---------- */
   function openDB() {
@@ -228,12 +229,29 @@
     return getAll().then(function (items) {
       var el = ensureBadge();
       var n = items.length;
-      if (n === 0) { el.style.display = "none"; return; }
+      if (n === 0) {
+        // Queue just drained after holding items -> every rating is confirmed
+        // saved on the server. Show a brief green confirmation for the rater.
+        if (lastN > 0) {
+          if (savedTimer) clearTimeout(savedTimer);
+          el.style.background = "#15803d";          // green
+          el.textContent = "✓ All ratings saved";
+          el.style.display = "block";
+          savedTimer = setTimeout(function () {
+            getAll().then(function (a) { if (a.length === 0) el.style.display = "none"; });
+          }, 2600);
+        } else {
+          el.style.display = "none";
+        }
+        lastN = 0;
+        return;
+      }
+      if (savedTimer) { clearTimeout(savedTimer); savedTimer = null; }
       var online = navigator.onLine;
       el.style.background = online ? "#b45309" : "#991b1b";
-      el.textContent = (online ? "↻ Uploading… " : "⚠ Offline · ")
-        + n + " waiting";
+      el.textContent = (online ? "↻ Saving… " : "⚠ Offline · ") + n + " waiting";
       el.style.display = "block";
+      lastN = n;
     });
   }
 
