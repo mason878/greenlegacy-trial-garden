@@ -38,7 +38,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0, savedTimer = null;  // for the "all saved" confirmation
-  var TG_VERSION = "20260701f";      // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260701g";      // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var updateAvailable = false;
 
   /* ---------- IndexedDB helpers ---------- */
@@ -165,22 +165,50 @@
     });
   }
 
+  // One request that returns every submissionId already saved on the server,
+  // so a whole burst is confirmed in a single call (no per-item check storm).
+  function getSavedIds(base) {
+    return ORIG_FETCH(base + "?action=savedids&t=" + Date.now(), { method: "GET" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (!j || !j.ids) return null;
+        var s = {}; j.ids.forEach(function (id) { s[String(id)] = 1; });
+        return s;
+      })
+      .catch(function () { return null; }); // can't confirm -> treat none as saved (safe: we keep + resend)
+  }
+
   var flushing = false;
+  var RESEND_MS = 12000;   // don't re-send an item we already sent within this window
   function flush() {
     if (flushing) return;
     if (!navigator.onLine) { updateBadge(); return; }
     flushing = true;
     getAll().then(function (items) {
+      if (!items.length) return;
       items.sort(function (a, b) { return a.ts - b.ts; });
-      // Send sequentially so a weak connection isn't overwhelmed.
-      var chain = Promise.resolve();
-      items.forEach(function (item) {
-        chain = chain.then(function () {
-          if (!navigator.onLine) return;
-          return sendItem(item);
+      var base = (items[0].url || "").split("?")[0];
+      return getSavedIds(base).then(function (saved) {
+        var now = Date.now();
+        var chain = Promise.resolve();
+        items.forEach(function (item) {
+          chain = chain.then(function () {
+            if (!navigator.onLine) return;
+            // Confirmed saved on the server -> safe to drop from the queue.
+            if (saved && saved[item.id]) return deleteItem(item.id);
+            // Not confirmed yet: (re)send only if we haven't sent it very recently.
+            if (item.lastSent && (now - item.lastSent) < RESEND_MS) return;
+            item.lastSent = now;
+            return putItem(item).then(function () {
+              return ORIG_FETCH(item.url, {
+                method: "POST", mode: "no-cors", body: item.body,
+                headers: { "Content-Type": "text/plain;charset=utf-8" }
+              }).catch(function () {});
+            });
+          });
         });
+        return chain;
       });
-      return chain;
     }).then(function () {
       flushing = false;
       updateBadge();
