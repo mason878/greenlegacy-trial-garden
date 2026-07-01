@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html lang="en"><head>
- <script src="tg-queue.js"></script>
+ <script src="tg-queue.js?v=20260701e"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>Green Legacy Trial Garden — Map</title>
@@ -200,7 +200,7 @@ async function loadRatings(){const st=document.getElementById('status');st.textC
   for(const k in RATINGS)RATINGS[k].sort((a,b)=>(a.date<b.date?1:-1));st.textContent='';
  }catch(e){st.textContent='Offline — showing varieties only.';}
  renderPlan();}
- (function(){const b=new URLSearchParams(location.search).get('bed');if(b&&BEDS[b])openBed(b,[b]);})();
+ (function(){const b=new URLSearchParams(location.search).get('bed');if(b&&BEDS[b]){openBed(b,[b]);history.replaceState({},'',location.pathname);}})();
 renderPlan();loadRatings();
-(function(){const b=new URLSearchParams(location.search).get('bed');if(b&&BEDS[b])openBed(b,[b]);})();
+(function(){const b=new URLSearchParams(location.search).get('bed');if(b&&BEDS[b]){openBed(b,[b]);history.replaceState({},'',location.pathname);}})();
 </script></body></html>
