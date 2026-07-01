@@ -38,6 +38,8 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0, savedTimer = null;  // for the "all saved" confirmation
+  var TG_VERSION = "20260701f";      // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var updateAvailable = false;
 
   /* ---------- IndexedDB helpers ---------- */
   function openDB() {
@@ -207,71 +209,120 @@
     };
   }
 
-  /* ---------- badge ---------- */
-  var badgeEl = null;
-  function ensureBadge() {
-    if (badgeEl) return badgeEl;
-    badgeEl = document.createElement("div");
-    badgeEl.id = "tgQueueBadge";
-    badgeEl.style.cssText = [
-      "position:fixed", "bottom:12px", "right:12px", "z-index:99999",
-      "background:#b45309", "color:#fff", "font:600 13px/1.2 system-ui,sans-serif",
-      "padding:8px 12px", "border-radius:20px", "box-shadow:0 2px 8px rgba(0,0,0,.3)",
-      "cursor:pointer", "display:none", "max-width:70vw"
+  /* ---------- top status bar ---------- */
+  var barEl = null, dotEl = null, connTextEl = null, queueEl = null, refreshEl = null;
+
+  function ensureBar() {
+    if (barEl) return barEl;
+    // Push page content down so the fixed bar doesn't cover it; keep sticky headers below it too.
+    try {
+      var st = document.createElement("style");
+      st.textContent = "body{padding-top:38px!important}header{top:38px!important}" +
+        "@keyframes tgpulse{0%,100%{opacity:1}50%{opacity:.5}}";
+      (document.head || document.documentElement).appendChild(st);
+    } catch (e) {}
+    barEl = document.createElement("div");
+    barEl.id = "tgBar";
+    barEl.style.cssText = [
+      "position:fixed","top:0","left:0","right:0","height:38px","z-index:2147483647",
+      "display:flex","align-items:center","justify-content:space-between","gap:8px",
+      "padding:0 10px","background:#243024","color:#fff",
+      "font:600 13px/1 system-ui,-apple-system,sans-serif","box-shadow:0 1px 6px rgba(0,0,0,.25)"
     ].join(";");
-    badgeEl.title = "Tap to retry now";
-    badgeEl.addEventListener("click", flush);
-    (document.body || document.documentElement).appendChild(badgeEl);
-    return badgeEl;
+    var conn = document.createElement("div");
+    conn.style.cssText = "display:flex;align-items:center;gap:6px;white-space:nowrap";
+    dotEl = document.createElement("span");
+    dotEl.style.cssText = "width:9px;height:9px;border-radius:50%;background:#22c55e;display:inline-block;flex:none";
+    connTextEl = document.createElement("span");
+    connTextEl.textContent = "Live";
+    conn.appendChild(dotEl); conn.appendChild(connTextEl);
+    queueEl = document.createElement("div");
+    queueEl.style.cssText = "flex:1;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+    queueEl.textContent = "✓ All saved";
+    refreshEl = document.createElement("button");
+    refreshEl.type = "button";
+    refreshEl.style.cssText = [
+      "border:0","border-radius:16px","padding:8px 12px","font:600 13px/1 system-ui,sans-serif",
+      "background:#3f7d46","color:#fff","cursor:pointer","white-space:nowrap","flex:none"
+    ].join(";");
+    refreshEl.textContent = "↻ Refresh";
+    refreshEl.addEventListener("click", function () {
+      refreshEl.textContent = "↻ …";
+      // Reload with a cache-buster on the page URL so we fetch the newest HTML + code
+      // (while preserving existing params like ?sku= / ?bed=).
+      try {
+        var u = new URL(location.href);
+        u.searchParams.set("r", String(Date.now()));
+        location.href = u.toString();
+      } catch (e) { location.reload(); }
+    });
+    barEl.appendChild(conn); barEl.appendChild(queueEl); barEl.appendChild(refreshEl);
+    (document.body || document.documentElement).appendChild(barEl);
+    return barEl;
   }
 
+  // Kept the name updateBadge so existing callers (flush/sendItem/enqueue) keep working.
   function updateBadge() {
+    ensureBar();
+    var online = navigator.onLine;
+    dotEl.style.background = online ? "#22c55e" : "#ef4444";
+    connTextEl.textContent = online ? "Live" : "Offline";
+    if (updateAvailable) {
+      refreshEl.textContent = "↻ Update now";
+      refreshEl.style.background = "#b45309";
+      refreshEl.style.animation = "tgpulse 1.2s ease-in-out infinite";
+    }
     return getAll().then(function (items) {
-      var el = ensureBadge();
       var n = items.length;
       if (n === 0) {
-        // Queue just drained after holding items -> every rating is confirmed
-        // saved on the server. Show a brief green confirmation for the rater.
-        if (lastN > 0) {
-          if (savedTimer) clearTimeout(savedTimer);
-          el.style.background = "#15803d";          // green
-          el.textContent = "✓ All ratings saved";
-          el.style.display = "block";
-          savedTimer = setTimeout(function () {
-            getAll().then(function (a) { if (a.length === 0) el.style.display = "none"; });
-          }, 2600);
-        } else {
-          el.style.display = "none";
-        }
-        lastN = 0;
-        return;
+        queueEl.style.color = "#86efac";
+        queueEl.textContent = "✓ All saved";
+      } else {
+        queueEl.style.color = "#fde68a";
+        queueEl.textContent = (online ? "⬆ Uploading… " : "⚠ Offline · ") + n + " to upload";
       }
-      if (savedTimer) { clearTimeout(savedTimer); savedTimer = null; }
-      var online = navigator.onLine;
-      el.style.background = online ? "#b45309" : "#991b1b";
-      el.textContent = (online ? "↻ Saving… " : "⚠ Offline · ") + n + " waiting";
-      el.style.display = "block";
       lastN = n;
     });
   }
 
+  /* ---------- version / update check ---------- */
+  function ownScriptBase() {
+    try {
+      var s = document.querySelector('script[src*="tg-queue.js"]');
+      if (s && s.src) return s.src.split("?")[0];
+    } catch (e) {}
+    return "tg-queue.js";
+  }
+  function checkVersion() {
+    return ORIG_FETCH(ownScriptBase() + "?vc=" + Date.now(), { cache: "no-store" })
+      .then(function (r) { return r.text(); })
+      .then(function (txt) {
+        var m = txt.match(/TG_VERSION\s*=\s*["']([^"']+)["']/);
+        if (m && m[1] && m[1] !== TG_VERSION) { updateAvailable = true; updateBadge(); }
+      }).catch(function () {});
+  }
+
   /* ---------- triggers ---------- */
   function init() {
-    ensureBadge();
+    ensureBar();
     updateBadge();
     flush();
+    checkVersion();
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {
     init();
   }
-  window.addEventListener("online", flush);
-  window.addEventListener("focus", flush);
+  window.addEventListener("online", function () { updateBadge(); flush(); });
+  window.addEventListener("offline", updateBadge);
+  window.addEventListener("focus", function () { updateBadge(); flush(); checkVersion(); });
   setInterval(function () {
+    updateBadge();
     getAll().then(function (items) { if (items.length) flush(); });
   }, RETRY_MS);
+  setInterval(checkVersion, 60000);
 
   // Expose a tiny API for manual use / debugging.
-  window.TGQueue = { flush: flush, pending: getAll };
+  window.TGQueue = { flush: flush, pending: getAll, version: TG_VERSION, checkVersion: checkVersion };
 })();
