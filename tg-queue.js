@@ -42,8 +42,9 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260715a";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260715b";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var updateAvailable = false;
+  var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
 
   // Endpoint health: null = unknown, true = reachable/saving, false = NOT saving.
   var endpointBase = null;
@@ -351,12 +352,51 @@
     } catch (e) {}
     return "tg-queue.js";
   }
+  // Is it safe to auto-reload without losing work? Only right after the page
+  // opened (nothing entered yet) and with an empty queue and no field being edited.
+  function safeToAutoReload() {
+    if (Date.now() - BOOT_TS > 8000) return false;          // only during the "just opened" window
+    if (lastN > 0) return false;                            // don't reload with queued items pending
+    var a = document.activeElement;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return false; // someone's typing
+    return true;
+  }
+
+  // Force a fully fresh load: a unique query string makes the CDN serve new
+  // HTML (which carries the new ?v= for this script), so the device lands on
+  // the current version. sessionStorage guard prevents any reload loop.
+  function hardReloadToLatest(deployedVer) {
+    try {
+      if (sessionStorage.getItem("tgReloadedFor") === deployedVer) return false;
+      sessionStorage.setItem("tgReloadedFor", deployedVer);
+    } catch (e) {}
+    try {
+      var u = new URL(location.href);
+      u.searchParams.set("_v", deployedVer);   // version-specific = CDN cache miss
+      u.searchParams.set("r", String(Date.now()));
+      location.replace(u.toString());          // replace() = no extra history entry
+    } catch (e) { location.reload(); }
+    return true;
+  }
+
+  function onVersionMismatch(deployedVer) {
+    var reloadedFor = null;
+    try { reloadedFor = sessionStorage.getItem("tgReloadedFor"); } catch (e) {}
+    // Fresh open on stale code -> silently heal to the current version.
+    if (safeToAutoReload() && reloadedFor !== deployedVer) {
+      hardReloadToLatest(deployedVer);
+    } else {
+      // Mid-session (rater may be entering data) -> loud manual button instead.
+      updateAvailable = true; updateBadge();
+    }
+  }
+
   function checkVersion() {
     return ORIG_FETCH(ownScriptBase() + "?vc=" + Date.now(), { cache: "no-store" })
       .then(function (r) { return r.text(); })
       .then(function (txt) {
         var m = txt.match(/TG_VERSION\s*=\s*["']([^"']+)["']/);
-        if (m && m[1] && m[1] !== TG_VERSION) { updateAvailable = true; updateBadge(); }
+        if (m && m[1] && m[1] !== TG_VERSION) { onVersionMismatch(m[1]); }
       }).catch(function () {});
   }
 
