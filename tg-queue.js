@@ -9,7 +9,7 @@
    - If the connection is good, it sends immediately (no change you'd notice).
    - If the connection is poor/offline, the submission waits in a queue and
      auto-retries in the background while the user keeps scanning plants.
-   - Shows a small "queued" badge in the corner with the count waiting.
+   - Shows a top status bar: connection state, queue count, and a Refresh.
 
    HOW IT HOOKS IN
    - It overrides window.fetch and only touches POSTs to the Apps Script
@@ -18,15 +18,18 @@
    - No change to Audrey's submit() logic is required — just load this file
      with a single <script> tag in <head>.
 
-   NOTES
-   - Sends use mode:'no-cors'. Apps Script does not return CORS headers, so the
-     browser can't read the response body; a resolved no-cors fetch means the
-     request reached the server, a rejected one means no connection. That is the
-     same delivery guarantee the old fire-and-forget code relied on, now with
-     persistence + retry added on top.
-   - Each queued item gets a unique submissionId (added to the payload). The
-     backend ignores it today, but it's there so a dedup check can be added to
-     the Apps Script later for bulletproof no-duplicate guarantees.
+   SAVE GUARANTEE
+   - Sends use mode:'no-cors' (Apps Script returns no CORS headers, so the
+     POST reply can't be read). We therefore CONFIRM every save with a
+     readable GET (?action=savedids / ?action=check) before removing an item
+     from the queue. Nothing is dropped until the server confirms it saved.
+
+   TRUTHFUL STATUS (added 2026-07-15)
+   - The connection dot no longer trusts navigator.onLine alone. It reflects
+     whether the SAVE ENDPOINT is actually reachable: green "Live" only when a
+     recent GET to the endpoint succeeded; red "Not saving" when the phone has
+     internet but the endpoint can't be reached (the exact failure that used to
+     hide behind a false green dot and silently lose ratings).
    ============================================================ */
 (function () {
   "use strict";
@@ -35,11 +38,18 @@
   var STORE = "submissions";
   var ENDPOINT_RE = /script\.google\.com\/macros\//i;
   var RETRY_MS = 20000;          // background retry interval while items remain
+  var PING_MS = 30000;           // endpoint health-check interval
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
-  var lastN = 0, savedTimer = null;  // for the "all saved" confirmation
-  var TG_VERSION = "20260701g";      // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var lastN = 0;
+  var TG_VERSION = "20260715a";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var updateAvailable = false;
+
+  // Endpoint health: null = unknown, true = reachable/saving, false = NOT saving.
+  var endpointBase = null;
+  var endpointOk = null;
+  var lastPing = 0;
+  try { endpointBase = localStorage.getItem("tgEndpointBase") || null; } catch (e) {}
 
   /* ---------- IndexedDB helpers ---------- */
   function openDB() {
@@ -94,6 +104,29 @@
     });
   }
 
+  /* ---------- endpoint memory + health ---------- */
+  function rememberEndpoint(url) {
+    try {
+      var b = (url || "").split("?")[0];
+      if (b && ENDPOINT_RE.test(b) && b !== endpointBase) {
+        endpointBase = b;
+        localStorage.setItem("tgEndpointBase", b);
+      }
+    } catch (e) {}
+  }
+
+  // A readable GET to the save endpoint. Success => we can actually save here.
+  function pingEndpoint() {
+    if (!endpointBase) { endpointOk = null; return Promise.resolve(); }
+    lastPing = Date.now();
+    return ORIG_FETCH(endpointBase + "?action=savedids&ping=" + Date.now(),
+                      { method: "GET", cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) { endpointOk = !!(j && j.ids); })
+      .catch(function () { endpointOk = false; })
+      .then(function () { updateBadge(); });
+  }
+
   /* ---------- queueing ---------- */
   function uuid() {
     if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -101,9 +134,10 @@
   }
 
   function enqueue(url, body) {
+    rememberEndpoint(url);
     var bodyStr = typeof body === "string" ? body : "";
     var id = uuid();
-    // Stamp a submissionId into the JSON payload (future-proofs backend dedup).
+    // Stamp a submissionId into the JSON payload (backend dedups on it).
     try {
       var obj = JSON.parse(bodyStr);
       if (obj && typeof obj === "object") {
@@ -122,38 +156,31 @@
 
   /* ---------- sending ---------- */
   // Ask the backend (readable GET) whether this submissionId already saved.
-  // GET responses from the Apps Script web app ARE readable (CORS-enabled),
-  // unlike the no-cors POST — so this is how we get a real save confirmation.
   function isSaved(item) {
     var base = item.url.split("?")[0];
     var check = base + "?action=check&id=" + encodeURIComponent(item.id);
     return ORIG_FETCH(check, { method: "GET" })
-      .then(function (r) { return r.ok ? r.json() : { saved: false }; })
+      .then(function (r) { endpointOk = r.ok ? true : endpointOk; return r.ok ? r.json() : { saved: false }; })
       .then(function (j) { return !!(j && j.saved); })
-      .catch(function () { return false; }); // can't confirm -> treat as not saved
+      .catch(function () { endpointOk = false; return false; });
   }
 
   function sendItem(item) {
     if (sending[item.id]) return Promise.resolve();
     sending[item.id] = true;
-    // 1) Confirm-first: if it already landed on a previous attempt, just drop it.
-    //    This prevents re-uploading photos and prevents duplicate rows.
     return isSaved(item).then(function (saved) {
       if (saved) return deleteItem(item.id);
-      // 2) Not saved yet -> send it (no-cors; can't read the reply here).
       return ORIG_FETCH(item.url, {
         method: "POST",
         mode: "no-cors",
         body: item.body,
         headers: { "Content-Type": "text/plain;charset=utf-8" }
       }).then(function () {
-        // Delivered to the server, but we do NOT delete yet. We keep the item
-        // and let the NEXT flush confirm via isSaved() before removing it, so
-        // a submission is never dropped until we've verified it actually saved.
+        // Delivered, but do NOT delete yet — the next flush confirms via
+        // isSaved()/savedids before removing it, so nothing is dropped early.
         item.attempts = (item.attempts || 0) + 1;
         return putItem(item);
       }).catch(function () {
-        // No connection. Keep it; bump attempts for visibility.
         item.attempts = (item.attempts || 0) + 1;
         return putItem(item);
       });
@@ -166,16 +193,17 @@
   }
 
   // One request that returns every submissionId already saved on the server,
-  // so a whole burst is confirmed in a single call (no per-item check storm).
+  // so a whole burst is confirmed in a single call. Also doubles as a health ping.
   function getSavedIds(base) {
     return ORIG_FETCH(base + "?action=savedids&t=" + Date.now(), { method: "GET" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (j) {
-        if (!j || !j.ids) return null;
+        if (!j || !j.ids) { endpointOk = false; return null; }
+        endpointOk = true; lastPing = Date.now();
         var s = {}; j.ids.forEach(function (id) { s[String(id)] = 1; });
         return s;
       })
-      .catch(function () { return null; }); // can't confirm -> treat none as saved (safe: we keep + resend)
+      .catch(function () { endpointOk = false; return null; });
   }
 
   var flushing = false;
@@ -186,6 +214,7 @@
     flushing = true;
     getAll().then(function (items) {
       if (!items.length) return;
+      rememberEndpoint(items[0].url);
       items.sort(function (a, b) { return a.ts - b.ts; });
       var base = (items[0].url || "").split("?")[0];
       return getSavedIds(base).then(function (saved) {
@@ -194,9 +223,7 @@
         items.forEach(function (item) {
           chain = chain.then(function () {
             if (!navigator.onLine) return;
-            // Confirmed saved on the server -> safe to drop from the queue.
             if (saved && saved[item.id]) return deleteItem(item.id);
-            // Not confirmed yet: (re)send only if we haven't sent it very recently.
             if (item.lastSent && (now - item.lastSent) < RESEND_MS) return;
             item.lastSent = now;
             return putItem(item).then(function () {
@@ -227,8 +254,6 @@
                       (input && input.method) || "GET").toUpperCase();
         if (method === "POST" && ENDPOINT_RE.test(url)) {
           var body = init && init.body;
-          // Persist first, then try to send; return immediately so the
-          // form's UI proceeds exactly as before.
           enqueue(url, body).then(flush);
           return Promise.resolve(new Response(null, { status: 202 }));
         }
@@ -242,7 +267,6 @@
 
   function ensureBar() {
     if (barEl) return barEl;
-    // Push page content down so the fixed bar doesn't cover it; keep sticky headers below it too.
     try {
       var st = document.createElement("style");
       st.textContent = "body{padding-top:38px!important}header{top:38px!important}" +
@@ -276,8 +300,6 @@
     refreshEl.textContent = "↻ Refresh";
     refreshEl.addEventListener("click", function () {
       refreshEl.textContent = "↻ …";
-      // Reload with a cache-buster on the page URL so we fetch the newest HTML + code
-      // (while preserving existing params like ?sku= / ?bed=).
       try {
         var u = new URL(location.href);
         u.searchParams.set("r", String(Date.now()));
@@ -289,12 +311,19 @@
     return barEl;
   }
 
-  // Kept the name updateBadge so existing callers (flush/sendItem/enqueue) keep working.
+  // Kept the name updateBadge so existing callers keep working.
   function updateBadge() {
     ensureBar();
     var online = navigator.onLine;
-    dotEl.style.background = online ? "#22c55e" : "#ef4444";
-    connTextEl.textContent = online ? "Live" : "Offline";
+    // Truthful dot: red if offline OR the save endpoint is unreachable.
+    var saving = online && (endpointOk !== false);
+    if (!online) {
+      dotEl.style.background = "#ef4444"; connTextEl.textContent = "Offline";
+    } else if (endpointOk === false) {
+      dotEl.style.background = "#ef4444"; connTextEl.textContent = "Not saving";
+    } else {
+      dotEl.style.background = "#22c55e"; connTextEl.textContent = "Live";
+    }
     if (updateAvailable) {
       refreshEl.textContent = "↻ Update now";
       refreshEl.style.background = "#b45309";
@@ -303,11 +332,12 @@
     return getAll().then(function (items) {
       var n = items.length;
       if (n === 0) {
-        queueEl.style.color = "#86efac";
-        queueEl.textContent = "✓ All saved";
+        if (!saving && online) { queueEl.style.color = "#fca5a5"; queueEl.textContent = "⚠ Can't reach server"; }
+        else { queueEl.style.color = "#86efac"; queueEl.textContent = "✓ All saved"; }
       } else {
-        queueEl.style.color = "#fde68a";
-        queueEl.textContent = (online ? "⬆ Uploading… " : "⚠ Offline · ") + n + " to upload";
+        if (!online) { queueEl.style.color = "#fde68a"; queueEl.textContent = "⚠ Offline · " + n + " to upload"; }
+        else if (endpointOk === false) { queueEl.style.color = "#fca5a5"; queueEl.textContent = "⚠ NOT SAVING · " + n + " stuck — reload"; }
+        else { queueEl.style.color = "#fde68a"; queueEl.textContent = "⬆ Uploading… " + n + " to upload"; }
       }
       lastN = n;
     });
@@ -334,6 +364,7 @@
   function init() {
     ensureBar();
     updateBadge();
+    pingEndpoint();
     flush();
     checkVersion();
   }
@@ -342,15 +373,20 @@
   } else {
     init();
   }
-  window.addEventListener("online", function () { updateBadge(); flush(); });
+  window.addEventListener("online", function () { updateBadge(); pingEndpoint(); flush(); });
   window.addEventListener("offline", updateBadge);
-  window.addEventListener("focus", function () { updateBadge(); flush(); checkVersion(); });
+  window.addEventListener("focus", function () { updateBadge(); pingEndpoint(); flush(); checkVersion(); });
   setInterval(function () {
     updateBadge();
     getAll().then(function (items) { if (items.length) flush(); });
   }, RETRY_MS);
+  setInterval(function () { if (Date.now() - lastPing > PING_MS - 1000) pingEndpoint(); }, PING_MS);
   setInterval(checkVersion, 60000);
 
   // Expose a tiny API for manual use / debugging.
-  window.TGQueue = { flush: flush, pending: getAll, version: TG_VERSION, checkVersion: checkVersion };
+  window.TGQueue = {
+    flush: flush, pending: getAll, version: TG_VERSION,
+    checkVersion: checkVersion, ping: pingEndpoint,
+    health: function () { return { endpointBase: endpointBase, endpointOk: endpointOk }; }
+  };
 })();
