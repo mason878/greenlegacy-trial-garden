@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260715b";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260715c";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
 
@@ -400,9 +400,38 @@
       }).catch(function () {});
   }
 
+  /* ---------- browser recommendation (use Chrome, not Safari) ---------- */
+  function browserBanner() {
+    try {
+      var ua = navigator.userAgent || "";
+      var isIOS = /iPhone|iPad|iPod/.test(ua) ||
+                  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+      var isChrome = /CriOS/.test(ua);            // Chrome on iOS
+      var isOtherOk = /FxiOS|EdgiOS/.test(ua);    // Firefox/Edge on iOS (leave alone)
+      if (!isIOS || isChrome || isOtherOk) return; // only warn iOS Safari / in-app webviews
+      if (document.getElementById("tgUseChrome")) return;
+      var bar = document.createElement("div");
+      bar.id = "tgUseChrome";
+      bar.style.cssText = [
+        "background:#b45309", "color:#fff", "padding:10px 12px",
+        "font:600 13px/1.35 system-ui,-apple-system,sans-serif", "text-align:center"
+      ].join(";");
+      var msg = document.createElement("span");
+      msg.textContent = "⚠ For reliable saving, open this in Chrome — Safari can block saves. ";
+      var link = document.createElement("a");
+      link.textContent = "Open in Chrome";
+      link.href = location.href.replace(/^https?:\/\//, "googlechromes://");
+      link.style.cssText = "color:#fff;text-decoration:underline;font-weight:800;white-space:nowrap";
+      bar.appendChild(msg); bar.appendChild(link);
+      var body = document.body || document.documentElement;
+      body.insertBefore(bar, body.firstChild);
+    } catch (e) {}
+  }
+
   /* ---------- triggers ---------- */
   function init() {
     ensureBar();
+    browserBanner();
     updateBadge();
     pingEndpoint();
     flush();
