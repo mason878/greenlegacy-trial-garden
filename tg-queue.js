@@ -42,7 +42,8 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716b";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716c";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
 
@@ -146,13 +147,17 @@
         bodyStr = JSON.stringify(obj);
       }
     } catch (e) { /* not JSON — store as-is */ }
-    return putItem({
-      id: id,
-      url: url,
-      body: bodyStr,
-      ts: Date.now(),
-      attempts: 0
-    }).then(updateBadge);
+    var item = { id: id, url: url, body: bodyStr, ts: Date.now(), attempts: 0 };
+    // iOS WebKit invalidates IndexedDB handles on long-open/backgrounded pages;
+    // a put on a stale handle rejects. Retry ONCE with a completely fresh
+    // connection before giving up (2026-07-16 silent-loss incident).
+    return putItem(item).catch(function () {
+      dbPromise = null;
+      return putItem(item);
+    }).then(function () {
+      storageFailed = false;
+      updateBadge();
+    });
   }
 
   /* ---------- sending ---------- */
@@ -272,7 +277,19 @@
             flush();
             return new Response(null, { status: 202 });
           }).catch(function () {
-            return new Response(null, { status: 202 });
+            // Storage is broken even after a fresh-connection retry (iOS stale
+            // IndexedDB). NEVER fake success here — that silently lost ratings
+            // on 2026-07-16. Fall back to sending the rating DIRECTLY to the
+            // server (the form's await now genuinely waits on the real send),
+            // and raise a loud red storage warning so the rater knows to
+            // close+reopen the page.
+            storageFailed = true;
+            try { updateBadge(); } catch (e2) {}
+            return ORIG_FETCH(url, {
+              method: "POST", mode: "no-cors", body: body,
+              headers: { "Content-Type": "text/plain;charset=utf-8" },
+              keepalive: true
+            });
           });
         }
       } catch (e) { /* fall through to real fetch */ }
@@ -336,6 +353,12 @@
     var online = navigator.onLine;
     // Truthful dot: red if offline OR the save endpoint is unreachable.
     var saving = online && (endpointOk !== false);
+    if (storageFailed) {
+      dotEl.style.background = "#ef4444"; connTextEl.textContent = "Storage error";
+      queueEl.style.color = "#fca5a5";
+      queueEl.textContent = "⚠ STORAGE ERROR — close & reopen this page";
+      return getAll().then(function (items) { lastN = items.length; });
+    }
     if (!online) {
       dotEl.style.background = "#ef4444"; connTextEl.textContent = "Offline";
     } else if (endpointOk === false) {
