@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716c";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716d";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -121,8 +121,8 @@
   function pingEndpoint() {
     if (!endpointBase) { endpointOk = null; return Promise.resolve(); }
     lastPing = Date.now();
-    return ORIG_FETCH(endpointBase + "?action=savedids&ping=" + Date.now(),
-                      { method: "GET", cache: "no-store" })
+    return tfetch(endpointBase + "?action=savedids&ping=" + Date.now(),
+                      { method: "GET", cache: "no-store" }, 12000)
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (j) { endpointOk = !!(j && j.ids); })
       .catch(function () { endpointOk = false; })
@@ -165,7 +165,7 @@
   function isSaved(item) {
     var base = item.url.split("?")[0];
     var check = base + "?action=check&id=" + encodeURIComponent(item.id);
-    return ORIG_FETCH(check, { method: "GET" })
+    return tfetch(check, { method: "GET" }, 12000)
       .then(function (r) { endpointOk = r.ok ? true : endpointOk; return r.ok ? r.json() : { saved: false }; })
       .then(function (j) { return !!(j && j.saved); })
       .catch(function () { endpointOk = false; return false; });
@@ -176,12 +176,12 @@
     sending[item.id] = true;
     return isSaved(item).then(function (saved) {
       if (saved) return deleteItem(item.id);
-      return ORIG_FETCH(item.url, {
+      return tfetch(item.url, {
         method: "POST",
         mode: "no-cors",
         body: item.body,
         headers: { "Content-Type": "text/plain;charset=utf-8" }
-      }).then(function () {
+      }, 30000).then(function () {
         // Delivered, but do NOT delete yet — the next flush confirms via
         // isSaved()/savedids before removing it, so nothing is dropped early.
         item.attempts = (item.attempts || 0) + 1;
@@ -201,7 +201,7 @@
   // One request that returns every submissionId already saved on the server,
   // so a whole burst is confirmed in a single call. Also doubles as a health ping.
   function getSavedIds(base) {
-    return ORIG_FETCH(base + "?action=savedids&t=" + Date.now(), { method: "GET" })
+    return tfetch(base + "?action=savedids&t=" + Date.now(), { method: "GET" }, 12000)
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (j) {
         if (!j || !j.ids) { endpointOk = false; return null; }
@@ -213,11 +213,16 @@
   }
 
   var flushing = false;
+  var flushStartedAt = 0;
   var RESEND_MS = 12000;   // don't re-send an item we already sent within this window
   function flush() {
+    // Watchdog: a flush cycle can't legitimately take 2 minutes now that every
+    // network call has a timeout — if the flag is that old it's wedged; reset.
+    if (flushing && Date.now() - flushStartedAt > 120000) flushing = false;
     if (flushing) return;
     if (!navigator.onLine) { updateBadge(); return; }
     flushing = true;
+    flushStartedAt = Date.now();
     getAll().then(function (items) {
       if (!items.length) return;
       rememberEndpoint(items[0].url);
@@ -233,10 +238,12 @@
             if (item.lastSent && (now - item.lastSent) < RESEND_MS) return;
             item.lastSent = now;
             return putItem(item).then(function () {
-              return ORIG_FETCH(item.url, {
+              // 30s cap per item: a slow/jammed item gets skipped this cycle
+              // (kept + retried later) instead of blocking everything behind it.
+              return tfetch(item.url, {
                 method: "POST", mode: "no-cors", body: item.body,
                 headers: { "Content-Type": "text/plain;charset=utf-8" }
-              }).catch(function () {});
+              }, 30000).catch(function () {});
             });
           });
         });
@@ -258,6 +265,25 @@
 
   /* ---------- fetch override ---------- */
   var ORIG_FETCH = window.fetch ? window.fetch.bind(window) : null;
+
+  // Fetch with a hard timeout. iOS leaves fetches hanging FOREVER after
+  // wifi/cell transitions; one hung request used to wedge the whole upload
+  // loop while the bar showed "Uploading…" (2026-07-16). Never again.
+  function tfetch(url, opts, ms) {
+    opts = opts || {};
+    try {
+      var ctl = new AbortController();
+      opts.signal = ctl.signal;
+      var timer = setTimeout(function () { try { ctl.abort(); } catch (e) {} }, ms || 30000);
+      return ORIG_FETCH(url, opts).then(function (r) {
+        clearTimeout(timer); return r;
+      }, function (e) {
+        clearTimeout(timer); throw e;
+      });
+    } catch (e) { // very old browsers without AbortController
+      return ORIG_FETCH(url, opts);
+    }
+  }
   if (ORIG_FETCH) {
     window.fetch = function (input, init) {
       try {
@@ -285,11 +311,11 @@
             // close+reopen the page.
             storageFailed = true;
             try { updateBadge(); } catch (e2) {}
-            return ORIG_FETCH(url, {
+            return tfetch(url, {
               method: "POST", mode: "no-cors", body: body,
               headers: { "Content-Type": "text/plain;charset=utf-8" },
               keepalive: true
-            });
+            }, 45000);
           });
         }
       } catch (e) { /* fall through to real fetch */ }
@@ -395,15 +421,22 @@
   function stampLinks() {
     try {
       var links = document.querySelectorAll(
-        'a[href*="rate.html"],a[href*="osu.html"],a[href*="index.html"],a[href="./"],a[href=""]');
+        'a[href*="rate.html"],a[href*="osu.html"],a[href*="index.html"]');
       for (var i = 0; i < links.length; i++) {
         var a = links[i];
         try {
-          var u = new URL(a.getAttribute("href"), location.href);
-          if (u.origin !== location.origin) continue;
-          if (u.searchParams.get("cb") === TG_VERSION) continue;
-          u.searchParams.set("cb", TG_VERSION);
-          a.setAttribute("href", u.pathname + u.search + u.hash);
+          var href = a.getAttribute("href") || "";
+          if (!href || href.indexOf("//") === 0 || /^https?:/i.test(href)) continue; // relative links only
+          if (href.indexOf("cb=" + TG_VERSION) !== -1) continue;
+          // RAW string append — do NOT parse/re-serialize the URL. Container and
+          // basket SKUs contain spaces; URL-normalizing re-encoded them and broke
+          // the form's SKU lookup ("SKU not found", 2026-07-16). Appending bytes
+          // leaves the original link exactly as the map built it.
+          var hash = "";
+          var hi = href.indexOf("#");
+          if (hi !== -1) { hash = href.slice(hi); href = href.slice(0, hi); }
+          href += (href.indexOf("?") !== -1 ? "&" : "?") + "cb=" + TG_VERSION;
+          a.setAttribute("href", href + hash);
         } catch (e) {}
       }
     } catch (e) {}
@@ -463,7 +496,7 @@
   }
 
   function checkVersion() {
-    return ORIG_FETCH(ownScriptBase() + "?vc=" + Date.now(), { cache: "no-store" })
+    return tfetch(ownScriptBase() + "?vc=" + Date.now(), { cache: "no-store" }, 12000)
       .then(function (r) { return r.text(); })
       .then(function (txt) {
         var m = txt.match(/TG_VERSION\s*=\s*["']([^"']+)["']/);
