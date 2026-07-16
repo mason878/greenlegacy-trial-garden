@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TG Diagnostics</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;background:#f4f6f3;color:#23302a;margin:0;padding:16px}
+h1{font-size:18px;color:#2E5D34}
+button{width:100%;padding:16px;font-size:18px;font-weight:700;border:0;border-radius:12px;background:#2E5D34;color:#fff}
+button:disabled{opacity:.5}
+#log{margin-top:14px}
+.row{background:#fff;border:1px solid #dfe6e0;border-radius:10px;padding:10px 12px;margin-bottom:8px;font-size:14px;line-height:1.45}
+.ok{border-left:5px solid #4f8a52}
+.bad{border-left:5px solid #c0653c}
+.pend{border-left:5px solid #d3bf78}
+small{color:#6b7a70;display:block;word-break:break-all}
+</style>
+</head>
+<body>
+<h1>Trial Garden — Save Diagnostics</h1>
+<p>Run this on the device having trouble, on the connection you normally use. It tests each step of saving a rating and shows exactly what fails.</p>
+<button id="run">Run tests</button>
+<div id="log"></div>
+<script>
+(function(){
+"use strict";
+var EP="https://script.google.com/macros/s/AKfycbx4Diml2w10p7fZpoIsP5jP7tYoLyz4MwmXSmYOMg9I5niXT_cPV965crpoHpJnkbdz/exec";
+var logEl=document.getElementById("log");
+function row(cls,html){var d=document.createElement("div");d.className="row "+cls;d.innerHTML=html;logEl.appendChild(d);return d;}
+function upd(d,cls,html){d.className="row "+cls;d.innerHTML=html;}
+
+function testIDB(){
+  var d=row("pend","1. Device storage (IndexedDB)… testing");
+  return new Promise(function(res){
+    var t0=Date.now();
+    try{
+      var req=indexedDB.open("tgDiagDB",1);
+      req.onupgradeneeded=function(){req.result.createObjectStore("t",{keyPath:"id"});};
+      req.onerror=function(){upd(d,"bad","1. Device storage: FAILED to open <small>"+String(req.error)+"</small>");res(false);};
+      req.onsuccess=function(){
+        try{
+          var db=req.result,tx=db.transaction("t","readwrite"),st=tx.objectStore("t");
+          var big="x";while(big.length<400000){big+=big;}
+          var w=st.put({id:"probe",blob:big,ts:Date.now()});
+          w.onerror=function(){upd(d,"bad","1. Device storage: WRITE FAILED <small>"+String(w.error)+"</small>");res(false);};
+          tx.oncomplete=function(){
+            upd(d,"ok","1. Device storage: OK ("+(Date.now()-t0)+" ms, 400KB written)");
+            try{db.close();indexedDB.deleteDatabase("tgDiagDB");}catch(e){}
+            res(true);
+          };
+          tx.onerror=function(){upd(d,"bad","1. Device storage: TX FAILED");res(false);};
+        }catch(e){upd(d,"bad","1. Device storage: EXCEPTION <small>"+e+"</small>");res(false);}
+      };
+    }catch(e){upd(d,"bad","1. Device storage: EXCEPTION <small>"+e+"</small>");res(false);}
+  });
+}
+
+function testGET(){
+  var d=row("pend","2. Server reachability (small GET)… testing");
+  var t0=Date.now();
+  return fetch(EP+"?action=savedids&diag="+Date.now(),{cache:"no-store"})
+    .then(function(r){return r.json();})
+    .then(function(j){
+      var n=(j&&j.ids)?j.ids.length:"?";
+      upd(d,"ok","2. Server reachability: OK ("+(Date.now()-t0)+" ms, "+n+" saved ids)");
+      return true;
+    }).catch(function(e){
+      upd(d,"bad","2. Server reachability: FAILED ("+(Date.now()-t0)+" ms) <small>"+e+"</small>");
+      return false;
+    });
+}
+
+function xhrPost(label,kb,idx){
+  var d=row("pend",idx+". Upload "+label+"… testing");
+  return new Promise(function(res){
+    var t0=Date.now(),maxPct=0;
+    var pad="x";while(pad.length<kb*1024){pad+=pad;}
+    pad=pad.slice(0,kb*1024);
+    var body=JSON.stringify({sku:"ZZ-DIAG",date:new Date().toISOString(),rater:"DIAG",
+      veg:1,uni:1,flo:1,res:1,notes:label+" "+pad,photos:[],submissionId:"DIAG-"+kb+"KB-"+Math.random().toString(16).slice(2,8)});
+    var x=new XMLHttpRequest();
+    x.open("POST",EP,true);
+    x.timeout=60000;
+    x.setRequestHeader("Content-Type","text/plain;charset=utf-8");
+    if(x.upload){x.upload.onprogress=function(ev){if(ev.lengthComputable)maxPct=Math.round(100*ev.loaded/ev.total);};}
+    x.onload=function(){
+      upd(d,(x.status>=200&&x.status<400)?"ok":"bad",
+        idx+". Upload "+label+": "+((x.status>=200&&x.status<400)?"OK":"HTTP "+x.status)+
+        " ("+(Date.now()-t0)+" ms, sent "+maxPct+"%)");
+      res(x.status>=200&&x.status<400);
+    };
+    x.onerror=function(){upd(d,"bad",idx+". Upload "+label+": NETWORK ERROR ("+(Date.now()-t0)+" ms, sent "+maxPct+"%) <small>request blocked or dropped before reaching server</small>");res(false);};
+    x.ontimeout=function(){upd(d,"bad",idx+". Upload "+label+": TIMED OUT after 60s (sent "+maxPct+"%)");res(false);};
+    try{x.send(body);}catch(e){upd(d,"bad",idx+". Upload "+label+": EXCEPTION <small>"+e+"</small>");res(false);}
+  });
+}
+
+document.getElementById("run").addEventListener("click",function(){
+  var btn=this;btn.disabled=true;btn.textContent="Running…";
+  logEl.innerHTML="";
+  row("pend","Device: <small>"+navigator.userAgent+"</small>");
+  testIDB()
+  .then(function(){return testGET();})
+  .then(function(){return xhrPost("tiny (1 KB)",1,3);})
+  .then(function(){return xhrPost("medium (300 KB, like a compressed photo)",300,4);})
+  .then(function(){return xhrPost("large (1.5 MB, big photo)",1500,5);})
+  .then(function(){
+    row("ok","Done. Read these results to Claude (or screenshot them). Test rows are marked ZZ-DIAG and will be cleaned from the sheet.");
+    btn.disabled=false;btn.textContent="Run tests again";
+  });
+});
+})();
+</script>
+</body>
+</html>
