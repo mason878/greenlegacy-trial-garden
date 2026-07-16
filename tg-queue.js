@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716a";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716b";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
 
@@ -235,7 +235,13 @@
             });
           });
         });
-        return chain;
+        return chain.then(function () {
+          // If we (re)sent anything this cycle, confirm quickly instead of
+          // waiting for the next 20s interval — makes "N to upload" clear in
+          // seconds after a successful save rather than minutes.
+          var sentAny = items.some(function (it) { return it.lastSent === now; });
+          if (sentAny) setTimeout(function () { flush(); }, 3500);
+        });
       });
     }).then(function () {
       flushing = false;
@@ -282,6 +288,7 @@
     try {
       var st = document.createElement("style");
       st.textContent = "body{padding-top:38px!important}header{top:38px!important}" +
+        ".phead{top:38px!important}" + // bed-panel sticky header (its X was hidden under the bar when scrolled)
         "@keyframes tgpulse{0%,100%{opacity:1}50%{opacity:.5}}";
       (document.head || document.documentElement).appendChild(st);
     } catch (e) {}
@@ -355,6 +362,34 @@
     });
   }
 
+  /* ---------- force-fresh page links (kill the stale-cache trap) ---------- */
+  // The map, form and OSU pages link to each other with plain relative URLs
+  // (rate.html?sku=..., index.html?bed=..., osu.html?plant=...). iOS HTTP cache
+  // served WEEKS-old copies of those pages even after deploys — a cached old
+  // rate.html silently lost submissions (2026-07-16 Bed 4/21 incident). This
+  // stamps every such link with the running TG_VERSION so a new deploy always
+  // changes the URL → the cache can never serve a stale page again.
+  function stampLinks() {
+    try {
+      var links = document.querySelectorAll(
+        'a[href*="rate.html"],a[href*="osu.html"],a[href*="index.html"],a[href="./"],a[href=""]');
+      for (var i = 0; i < links.length; i++) {
+        var a = links[i];
+        try {
+          var u = new URL(a.getAttribute("href"), location.href);
+          if (u.origin !== location.origin) continue;
+          if (u.searchParams.get("cb") === TG_VERSION) continue;
+          u.searchParams.set("cb", TG_VERSION);
+          a.setAttribute("href", u.pathname + u.search + u.hash);
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  // Also catch JS-driven navigations to those pages (location.href = ...).
+  // We can't wrap location, but re-stamping on click covers anchor taps that
+  // were (re)built dynamically after our last pass.
+  document.addEventListener("click", stampLinks, true);
+
   /* ---------- version / update check ---------- */
   function ownScriptBase() {
     try {
@@ -367,7 +402,9 @@
   // opened (nothing entered yet) and with an empty queue and no field being edited.
   function safeToAutoReload() {
     if (Date.now() - BOOT_TS > 8000) return false;          // only during the "just opened" window
-    if (lastN > 0) return false;                            // don't reload with queued items pending
+    // NOTE: queued items do NOT block the reload — the queue lives in IndexedDB
+    // and fully survives a reload. (The old "pending items" guard backfired: a
+    // stuck queue kept stale pages stuck on old code forever. 2026-07-16)
     var a = document.activeElement;
     if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return false; // someone's typing
     return true;
@@ -443,6 +480,7 @@
   function init() {
     ensureBar();
     browserBanner();
+    stampLinks();
     updateBadge();
     pingEndpoint();
     flush();
