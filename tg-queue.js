@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716i";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716j";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -141,10 +141,18 @@
   // Union of both stores. idbOk=false means IndexedDB itself is unreadable
   // (items may still come from the LS mirror). Never rejects.
   function allItems() {
-    return getAll().then(
+    // v-j: after a rapid refresh, iOS can leave the previous page's IndexedDB
+    // teardown in progress — this page's read then HANGS (neither resolves nor
+    // rejects) and the bar used to freeze on its boot placeholder. Race the
+    // read against a 3s timer; on timeout fall back to the LS mirror.
+    var idbRead = getAll().then(
       function (idb) { return { idbOk: true, idb: idb }; },
       function () { return { idbOk: false, idb: [] }; }
-    ).then(function (r) {
+    );
+    var idbTimeout = new Promise(function (rs) {
+      setTimeout(function () { rs({ idbOk: false, idb: [] }); }, 3000);
+    });
+    return Promise.race([idbRead, idbTimeout]).then(function (r) {
       var seen = {}, out = [];
       r.idb.forEach(function (it) { if (it && it.id && !seen[it.id]) { seen[it.id] = 1; out.push(it); } });
       lsAll().forEach(function (it) { if (it && it.id && !seen[it.id]) { seen[it.id] = 1; out.push(it); } });
@@ -434,7 +442,7 @@
     conn.appendChild(dotEl); conn.appendChild(connTextEl);
     queueEl = document.createElement("div");
     queueEl.style.cssText = "flex:1;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
-    queueEl.textContent = "✓ All saved";
+    queueEl.textContent = '…'; // v-j: NEUTRAL boot text — never claim saved before real data
     refreshEl = document.createElement("button");
     refreshEl.type = "button";
     refreshEl.style.cssText = [
