@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260715c";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716a";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
 
@@ -255,8 +255,19 @@
                       (input && input.method) || "GET").toUpperCase();
         if (method === "POST" && ENDPOINT_RE.test(url)) {
           var body = init && init.body;
-          enqueue(url, body).then(flush);
-          return Promise.resolve(new Response(null, { status: 202 }));
+          // CRITICAL: resolve only AFTER the submission is persisted to IndexedDB.
+          // The form does `await fetch(...)` then immediately redirects to the bed
+          // list; if we resolved before the async save committed, the navigation
+          // aborted the save and the rating was lost (never stored, never sent).
+          // Awaiting enqueue here makes the redirect wait for persistence; flush()
+          // then sends it, and the next page load re-flushes from IndexedDB, so a
+          // submission can never be dropped by the post-submit navigation.
+          return enqueue(url, body).then(function () {
+            flush();
+            return new Response(null, { status: 202 });
+          }).catch(function () {
+            return new Response(null, { status: 202 });
+          });
         }
       } catch (e) { /* fall through to real fetch */ }
       return ORIG_FETCH(input, init);
