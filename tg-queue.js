@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716g";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716h";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -240,7 +240,7 @@
         items.forEach(function (item) {
           chain = chain.then(function () {
             if (!navigator.onLine) return;
-            if (saved && saved[item.id]) return deleteItem(item.id);
+            if (saved && saved[item.id]) { logConfirmed(item); return deleteItem(item.id); }
             if (item.lastSent && (now - item.lastSent) < RESEND_MS) return;
             item.lastSent = now;
             return putItem(item).then(function () {
@@ -379,11 +379,98 @@
     verEl.style.cssText = 'flex:none;opacity:.8;font:700 12px/1 system-ui,sans-serif;color:#cfe3cf;letter-spacing:.5px';
     verEl.textContent = 'v\u00B7' + TG_VERSION.slice(-4);
     barEl.appendChild(conn); barEl.appendChild(queueEl); barEl.appendChild(verEl); barEl.appendChild(refreshEl);
+    queueEl.style.cursor = 'pointer';
+    queueEl.addEventListener('click', togglePanel);
     (document.body || document.documentElement).appendChild(barEl);
     return barEl;
   }
 
   // Kept the name updateBadge so existing callers keep working.
+  /* ---------- queue inspector (v-h): tap the counter text to see every
+     pending item on THIS device and its recent confirmed saves ---------- */
+  function skuOf(body) {
+    try { var o = JSON.parse(body); if (o && o.sku) return String(o.sku); } catch (e) {}
+    var m = String(body || '').match(/GL-\d{4}/);
+    return m ? m[0] : '(unknown)';
+  }
+  function logConfirmed(item) {
+    try {
+      var L = JSON.parse(localStorage.getItem('tgSentLog') || '[]');
+      L.unshift({ sku: skuOf(item.body), ts: item.ts, ct: Date.now() });
+      localStorage.setItem('tgSentLog', JSON.stringify(L.slice(0, 50)));
+    } catch (e) {}
+  }
+  function fmtAge(ms) {
+    var s = Math.max(1, Math.round(ms / 1000));
+    if (s < 60) return s + 's';
+    var m = Math.round(s / 60);
+    if (m < 60) return m + 'm';
+    return (m / 60).toFixed(1) + 'h';
+  }
+  var panelEl = null;
+  function pline(txt, bold, color) {
+    var d = document.createElement('div');
+    d.textContent = txt;
+    d.style.cssText = 'padding:3px 0' + (bold ? ';font-weight:700;margin-top:8px' : '') + (color ? ';color:' + color : '');
+    return d;
+  }
+  function fillPanel() {
+    if (!panelEl) return;
+    var el = panelEl;
+    var now = Date.now();
+    getAll().then(function (items) { return items; }, function () { return null; }).then(function (items) {
+      if (!panelEl) return;
+      el.textContent = '';
+      if (items === null) {
+        el.appendChild(pline('⚠ Storage unreadable — close & reopen this page', true, '#ffb3b3'));
+        items = [];
+      } else {
+        el.appendChild(pline('Waiting to upload (' + items.length + ')', true));
+        if (!items.length) el.appendChild(pline('— nothing pending —', false, '#9fbf9f'));
+        items.sort(function (a, b) { return a.ts - b.ts; }).forEach(function (it) {
+          el.appendChild(pline('⬆ ' + skuOf(it.body) + ' · queued ' + fmtAge(now - it.ts) + ' ago · ' +
+            (it.lastSent ? 'last try ' + fmtAge(now - it.lastSent) + ' ago' : 'not tried yet') +
+            ' · ' + Math.max(1, Math.round(String(it.body || '').length / 1024)) + 'kB'));
+        });
+      }
+      var L = [];
+      try { L = JSON.parse(localStorage.getItem('tgSentLog') || '[]'); } catch (e) {}
+      el.appendChild(pline('Saved to sheet from this device (last ' + Math.min(L.length, 20) + ')', true));
+      if (!L.length) el.appendChild(pline('— none confirmed yet on this device —', false, '#9fbf9f'));
+      L.slice(0, 20).forEach(function (r) {
+        el.appendChild(pline('✓ ' + r.sku + ' · rated ' + fmtAge(now - r.ts) + ' ago · confirmed ' + fmtAge(now - r.ct) + ' ago', false, '#9fdf9f'));
+      });
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = '⬆ Send now';
+      btn.style.cssText = 'margin-top:10px;border:0;border-radius:16px;padding:8px 14px;font:600 13px/1 system-ui,sans-serif;background:#3f7d46;color:#fff';
+      btn.addEventListener('click', function () {
+        btn.textContent = '…';
+        getAll().then(function (its) {
+          return Promise.all(its.map(function (it) { it.lastSent = 0; return putItem(it); }));
+        }).catch(function () {}).then(function () {
+          flushing = false; flush(); setTimeout(fillPanel, 2000);
+        });
+      });
+      el.appendChild(btn);
+      var cls = document.createElement('button');
+      cls.type = 'button';
+      cls.textContent = 'Close';
+      cls.style.cssText = 'margin:10px 0 0 8px;border:0;border-radius:16px;padding:8px 14px;font:600 13px/1 system-ui,sans-serif;background:#444;color:#fff';
+      cls.addEventListener('click', togglePanel);
+      el.appendChild(cls);
+    });
+  }
+  function togglePanel() {
+    if (panelEl) { try { panelEl.parentNode.removeChild(panelEl); } catch (e) {} panelEl = null; return; }
+    panelEl = document.createElement('div');
+    panelEl.id = 'tgPanel';
+    panelEl.style.cssText = 'position:fixed;top:38px;left:0;right:0;max-height:65vh;overflow:auto;z-index:2147483646;background:#1c241c;color:#fff;font:500 13px/1.5 system-ui,-apple-system,sans-serif;padding:10px 14px 14px;box-shadow:0 8px 16px rgba(0,0,0,.45)';
+    (document.body || document.documentElement).appendChild(panelEl);
+    fillPanel();
+  }
+  setInterval(function () { if (panelEl) fillPanel(); }, 3000);
+
   function updateBadge() {
     ensureBar();
     var online = navigator.onLine;
