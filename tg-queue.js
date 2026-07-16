@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716h";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716i";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -112,6 +112,46 @@
       .then(function (res) { return res || []; });
   }
 
+  /* ---------- localStorage mirror (v-i) ----------
+     iOS can kill IndexedDB or silently SWAP it for a fresh EMPTY database
+     after camera/background use — queued items become invisible with NO
+     error (bar said "All saved" while ratings sat unreachable). Every item
+     that fits is therefore ALSO written to localStorage, and every reader
+     uses the UNION of both stores. */
+  var LSQ = 'tgLSQ';
+  function lsAll() {
+    try { return JSON.parse(localStorage.getItem(LSQ) || '[]'); } catch (e) { return []; }
+  }
+  function lsWrite(list) {
+    try { localStorage.setItem(LSQ, JSON.stringify(list)); return true; } catch (e) { return false; }
+  }
+  function lsPut(item) {
+    try {
+      var L = lsAll().filter(function (x) { return x && x.id !== item.id; });
+      L.push(item);
+      var total = 0;
+      for (var i = 0; i < L.length; i++) total += String(L[i].body || '').length;
+      if (total > 3500000) return false; // over LS budget — IDB only
+      return lsWrite(L);
+    } catch (e) { return false; }
+  }
+  function lsDel(id) {
+    try { lsWrite(lsAll().filter(function (x) { return x && x.id !== id; })); } catch (e) {}
+  }
+  // Union of both stores. idbOk=false means IndexedDB itself is unreadable
+  // (items may still come from the LS mirror). Never rejects.
+  function allItems() {
+    return getAll().then(
+      function (idb) { return { idbOk: true, idb: idb }; },
+      function () { return { idbOk: false, idb: [] }; }
+    ).then(function (r) {
+      var seen = {}, out = [];
+      r.idb.forEach(function (it) { if (it && it.id && !seen[it.id]) { seen[it.id] = 1; out.push(it); } });
+      lsAll().forEach(function (it) { if (it && it.id && !seen[it.id]) { seen[it.id] = 1; out.push(it); } });
+      return { items: out, idbOk: r.idbOk };
+    });
+  }
+
   /* ---------- endpoint memory + health ---------- */
   function rememberEndpoint(url) {
     try {
@@ -157,12 +197,19 @@
     // iOS WebKit invalidates IndexedDB handles on long-open/backgrounded pages;
     // a put on a stale handle rejects. Retry ONCE with a completely fresh
     // connection before giving up (2026-07-16 silent-loss incident).
+    // v-i: WRITE-THROUGH — mirror to localStorage FIRST (synchronous; survives
+    // iOS killing or swapping IndexedDB), then IndexedDB. The submission is
+    // safe (and the form may redirect) if EITHER store holds it.
+    var lsOk = lsPut(item);
     return putItem(item).catch(function () {
       dbPromise = null;
       return putItem(item);
     }).then(function () {
       storageFailed = false;
       updateBadge();
+    }, function (err) {
+      if (lsOk) { storageFailed = false; updateBadge(); return; }
+      throw err; // BOTH stores failed — caller falls back to direct-send+confirm
     });
   }
 
@@ -229,7 +276,8 @@
     if (!navigator.onLine) { updateBadge(); return; }
     flushing = true;
     flushStartedAt = Date.now();
-    getAll().then(function (items) {
+    allItems().then(function (res) {
+      var items = res.items;
       if (!items.length) return;
       rememberEndpoint(items[0].url);
       items.sort(function (a, b) { return a.ts - b.ts; });
@@ -240,10 +288,11 @@
         items.forEach(function (item) {
           chain = chain.then(function () {
             if (!navigator.onLine) return;
-            if (saved && saved[item.id]) { logConfirmed(item); return deleteItem(item.id); }
+            if (saved && saved[item.id]) { logConfirmed(item); lsDel(item.id); return deleteItem(item.id); }
             if (item.lastSent && (now - item.lastSent) < RESEND_MS) return;
             item.lastSent = now;
-            return putItem(item).then(function () {
+            lsPut(item); // keep LS mirror in sync (works even when IDB is dead)
+            return putItem(item).catch(function () {}).then(function () {
               // 30s cap per item: a slow/jammed item gets skipped this cycle
               // (kept + retried later) instead of blocking everything behind it.
               return tfetch(item.url, {
@@ -317,11 +366,38 @@
             // close+reopen the page.
             storageFailed = true;
             try { updateBadge(); } catch (e2) {}
+            // v-i: a direct-send alone is NOT proof of save (no-cors resolve
+            // only means "reached server"). Stamp an id, send, then CONFIRM
+            // via ?action=check&id=. Only a confirmed save resolves (letting
+            // the form redirect); otherwise REJECT so the form stays on
+            // screen with the rater's data intact for a retry.
+            var dsid = uuid();
+            var sendBody = body;
+            try {
+              var ob = JSON.parse(typeof body === 'string' ? body : String(body));
+              if (ob && typeof ob === 'object') { ob.submissionId = dsid; sendBody = JSON.stringify(ob); }
+              else dsid = null;
+            } catch (e3) { dsid = null; }
+            var dsBase = (url || '').split('?')[0];
             return tfetch(url, {
-              method: "POST", mode: "no-cors", body: body,
-              headers: { "Content-Type": "text/plain;charset=utf-8" },
+              method: 'POST', mode: 'no-cors', body: sendBody,
+              headers: { 'Content-Type': 'text/plain;charset=utf-8' },
               keepalive: true
-            }, 45000);
+            }, 45000).then(function () {
+              if (!dsid) return new Response(null, { status: 202 });
+              var tries = 0;
+              function poll() {
+                tries++;
+                return tfetch(dsBase + '?action=check&id=' + encodeURIComponent(dsid), { method: 'GET' }, 12000)
+                  .then(function (r) { return r.json(); })
+                  .then(function (js) {
+                    if (js && js.saved) return new Response(null, { status: 202 });
+                    if (tries >= 4) throw new Error('save unconfirmed');
+                    return new Promise(function (rs) { setTimeout(rs, 4000); }).then(poll);
+                  });
+              }
+              return poll();
+            });
           });
         }
       } catch (e) { /* fall through to real fetch */ }
@@ -418,7 +494,7 @@
     if (!panelEl) return;
     var el = panelEl;
     var now = Date.now();
-    getAll().then(function (items) { return items; }, function () { return null; }).then(function (items) {
+    allItems().then(function (res) { return (!res.idbOk && !res.items.length) ? null : res.items; }).then(function (items) {
       if (!panelEl) return;
       el.textContent = '';
       if (items === null) {
@@ -446,8 +522,8 @@
       btn.style.cssText = 'margin-top:10px;border:0;border-radius:16px;padding:8px 14px;font:600 13px/1 system-ui,sans-serif;background:#3f7d46;color:#fff';
       btn.addEventListener('click', function () {
         btn.textContent = '…';
-        getAll().then(function (its) {
-          return Promise.all(its.map(function (it) { it.lastSent = 0; return putItem(it); }));
+        allItems().then(function (res) {
+          return Promise.all(res.items.map(function (it) { it.lastSent = 0; lsPut(it); return putItem(it).catch(function () {}); }));
         }).catch(function () {}).then(function () {
           flushing = false; flush(); setTimeout(fillPanel, 2000);
         });
@@ -480,7 +556,7 @@
       dotEl.style.background = "#ef4444"; connTextEl.textContent = "Storage error";
       queueEl.style.color = "#fca5a5";
       queueEl.textContent = "⚠ STORAGE ERROR — close & reopen this page";
-      return getAll().then(function (items) { lastN = items.length; });
+      return allItems().then(function (res) { lastN = res.items.length; });
     }
     if (!online) {
       dotEl.style.background = "#ef4444"; connTextEl.textContent = "Offline";
@@ -494,7 +570,15 @@
       refreshEl.style.background = "#b45309";
       refreshEl.style.animation = "tgpulse 1.2s ease-in-out infinite";
     }
-    return getAll().then(function (items) {
+    return allItems().then(function (res) {
+      var items = res.items;
+      if (!res.idbOk) {
+        dotEl.style.background = '#ef4444'; connTextEl.textContent = 'Storage glitch';
+        queueEl.style.color = '#fca5a5';
+        queueEl.textContent = items.length ? ('⚠ ' + items.length + ' to upload — close & reopen this page') : '⚠ Storage glitch — tap Refresh';
+        lastN = items.length;
+        return;
+      }
       var n = items.length;
       if (n === 0) {
         if (!saving && online) { queueEl.style.color = "#fca5a5"; queueEl.textContent = "⚠ Can't reach server"; }
