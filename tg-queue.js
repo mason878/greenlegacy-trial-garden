@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716e";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716f";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -70,40 +70,46 @@
     return dbPromise;
   }
 
-  function tx(mode) {
-    return openDB().then(function (db) {
-      return db.transaction(STORE, mode).objectStore(STORE);
+  // Every IndexedDB operation retries ONCE on a completely fresh connection.
+  // iOS invalidates DB handles mid-session (sleep/background); with the old
+  // helpers a stale handle made getAll() fail or return [] — so the bar LIED
+  // "All saved" while unsent ratings sat frozen, and flush() sent nothing,
+  // until a manual refresh rebuilt the handle (2026-07-16 field report).
+  function idbOp(mode, makeReq) {
+    function attempt() {
+      return openDB().then(function (db) {
+        return new Promise(function (resolve, reject) {
+          var t, st, req;
+          try {
+            t = db.transaction(STORE, mode);
+            st = t.objectStore(STORE);
+            req = makeReq(st);
+          } catch (e) { reject(e); return; }
+          req.onsuccess = function () { resolve(req.result); };
+          req.onerror = function () { reject(req.error); };
+        });
+      });
+    }
+    return attempt().catch(function () {
+      dbPromise = null;               // stale handle — rebuild from scratch
+      return attempt();
     });
   }
 
   function putItem(item) {
-    return tx("readwrite").then(function (store) {
-      return new Promise(function (resolve, reject) {
-        var r = store.put(item);
-        r.onsuccess = function () { resolve(); };
-        r.onerror = function () { reject(r.error); };
-      });
-    });
+    return idbOp("readwrite", function (st) { return st.put(item); });
   }
 
   function deleteItem(id) {
-    return tx("readwrite").then(function (store) {
-      return new Promise(function (resolve) {
-        var r = store.delete(id);
-        r.onsuccess = function () { resolve(); };
-        r.onerror = function () { resolve(); };
-      });
-    });
+    return idbOp("readwrite", function (st) { return st.delete(id); })
+      .catch(function () {});
   }
 
+  // Resolves with the real queue; REJECTS if storage is unreadable even after
+  // a fresh connection — callers must NOT treat that as "queue is empty".
   function getAll() {
-    return tx("readonly").then(function (store) {
-      return new Promise(function (resolve) {
-        var r = store.getAll();
-        r.onsuccess = function () { resolve(r.result || []); };
-        r.onerror = function () { resolve([]); };
-      });
-    });
+    return idbOp("readonly", function (st) { return st.getAll(); })
+      .then(function (res) { return res || []; });
   }
 
   /* ---------- endpoint memory + health ---------- */
@@ -408,6 +414,11 @@
         else { queueEl.style.color = "#fde68a"; queueEl.textContent = "⬆ Uploading… " + n + " to upload"; }
       }
       lastN = n;
+    }).catch(function () {
+      // Storage unreadable even after a fresh connection: NEVER claim "saved".
+      dotEl.style.background = "#ef4444"; connTextEl.textContent = "Storage glitch";
+      queueEl.style.color = "#fca5a5";
+      queueEl.textContent = "⚠ Storage glitch — tap Refresh";
     });
   }
 
@@ -525,6 +536,13 @@
   window.addEventListener("online", function () { updateBadge(); pingEndpoint(); flush(); });
   window.addEventListener("offline", updateBadge);
   window.addEventListener("focus", function () { updateBadge(); pingEndpoint(); flush(); checkVersion(); });
+  // iOS invalidates IndexedDB handles while the page sleeps in the background
+  // or sits in the back-forward cache. Rebuild the connection every time the
+  // page comes back to life, before anything reads or writes the queue.
+  window.addEventListener("pageshow", function () { dbPromise = null; storageFailed = false; updateBadge(); flush(); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") { dbPromise = null; storageFailed = false; updateBadge(); flush(); }
+  });
   setInterval(function () {
     updateBadge();
     getAll().then(function (items) { if (items.length) flush(); });
