@@ -18,8 +18,8 @@ small{color:#6b7a70;display:block;word-break:break-all}
 </style>
 </head>
 <body>
-<h1>Trial Garden — Save Diagnostics</h1>
-<p>Run this on the device having trouble, on the connection you normally use. It tests each step of saving a rating and shows exactly what fails.</p>
+<h1>Trial Garden — Save Diagnostics v2</h1>
+<p>Run this on the device having trouble, on the connection you normally use. Each upload test uses the EXACT same send method as the rating form, then verifies with the server that it truly saved.</p>
 <button id="run">Run tests</button>
 <div id="log"></div>
 <script>
@@ -71,40 +71,53 @@ function testGET(){
     });
 }
 
-function xhrPost(label,kb,idx){
-  var d=row("pend",idx+". Upload "+label+"… testing");
-  return new Promise(function(res){
-    var t0=Date.now(),maxPct=0;
-    var pad="x";while(pad.length<kb*1024){pad+=pad;}
-    pad=pad.slice(0,kb*1024);
-    var body=JSON.stringify({sku:"ZZ-DIAG",date:new Date().toISOString(),rater:"DIAG",
-      veg:1,uni:1,flo:1,res:1,notes:label+" "+pad,photos:[],submissionId:"DIAG-"+kb+"KB-"+Math.random().toString(16).slice(2,8)});
-    var x=new XMLHttpRequest();
-    x.open("POST",EP,true);
-    x.timeout=60000;
-    x.setRequestHeader("Content-Type","text/plain;charset=utf-8");
-    if(x.upload){x.upload.onprogress=function(ev){if(ev.lengthComputable)maxPct=Math.round(100*ev.loaded/ev.total);};}
-    x.onload=function(){
-      upd(d,(x.status>=200&&x.status<400)?"ok":"bad",
-        idx+". Upload "+label+": "+((x.status>=200&&x.status<400)?"OK":"HTTP "+x.status)+
-        " ("+(Date.now()-t0)+" ms, sent "+maxPct+"%)");
-      res(x.status>=200&&x.status<400);
-    };
-    x.onerror=function(){upd(d,"bad",idx+". Upload "+label+": NETWORK ERROR ("+(Date.now()-t0)+" ms, sent "+maxPct+"%) <small>request blocked or dropped before reaching server</small>");res(false);};
-    x.ontimeout=function(){upd(d,"bad",idx+". Upload "+label+": TIMED OUT after 60s (sent "+maxPct+"%)");res(false);};
-    try{x.send(body);}catch(e){upd(d,"bad",idx+". Upload "+label+": EXCEPTION <small>"+e+"</small>");res(false);}
-  });
+// Send exactly like the rating form + queue do (fetch, no-cors, text/plain),
+// then CONFIRM with the readable ?action=check GET that the row truly saved.
+function realPost(label,kb,idx){
+  var d=row("pend",idx+". Upload "+label+"… sending");
+  var id="DIAG-"+kb+"KB-"+Math.random().toString(16).slice(2,8);
+  var pad="x";while(pad.length<kb*1024){pad+=pad;}
+  pad=pad.slice(0,kb*1024);
+  var body=JSON.stringify({sku:"ZZ-DIAG",date:new Date().toISOString(),rater:"DIAG",
+    veg:1,uni:1,flo:1,res:1,notes:label+" "+pad,photos:[],submissionId:id});
+  var t0=Date.now(), sendMs=null, delivered=false;
+  return fetch(EP,{method:"POST",mode:"no-cors",
+      headers:{"Content-Type":"text/plain;charset=utf-8"},body:body})
+    .then(function(){ delivered=true; sendMs=Date.now()-t0; },
+          function(e){ sendMs=Date.now()-t0;
+            upd(d,"bad",idx+". Upload "+label+": SEND FAILED after "+sendMs+" ms <small>"+e+" — request never reached the server (network/browser blocked it)</small>"); })
+    .then(function(){
+      if(!delivered) return false;
+      upd(d,"pend",idx+". Upload "+label+": sent in "+sendMs+" ms — waiting for server confirmation…");
+      function confirmTry(attempt){
+        return new Promise(function(rz){setTimeout(rz,4000);}).then(function(){
+          return fetch(EP+"?action=check&id="+encodeURIComponent(id)+"&t="+Date.now())
+            .then(function(r){return r.json();})
+            .then(function(j){return !!(j&&j.saved);})
+            .catch(function(){return false;});
+        }).then(function(saved){
+          if(saved) return true;
+          if(attempt<3) return confirmTry(attempt+1);
+          return false;
+        });
+      }
+      return confirmTry(1).then(function(saved){
+        if(saved){upd(d,"ok",idx+". Upload "+label+": SAVED ✔ (sent "+sendMs+" ms, confirmed in sheet)");}
+        else{upd(d,"bad",idx+". Upload "+label+": sent ("+sendMs+" ms) but NOT SAVED after 3 checks <small>request appeared delivered but the server never recorded it</small>");}
+        return saved;
+      });
+    });
 }
 
 document.getElementById("run").addEventListener("click",function(){
-  var btn=this;btn.disabled=true;btn.textContent="Running…";
+  var btn=this;btn.disabled=true;btn.textContent="Running… (takes ~1 minute)";
   logEl.innerHTML="";
   row("pend","Device: <small>"+navigator.userAgent+"</small>");
   testIDB()
   .then(function(){return testGET();})
-  .then(function(){return xhrPost("tiny (1 KB)",1,3);})
-  .then(function(){return xhrPost("medium (300 KB, like a compressed photo)",300,4);})
-  .then(function(){return xhrPost("large (1.5 MB, big photo)",1500,5);})
+  .then(function(){return realPost("tiny (1 KB)",1,3);})
+  .then(function(){return realPost("medium (300 KB, like a compressed photo)",300,4);})
+  .then(function(){return realPost("large (1.5 MB, big photo)",1500,5);})
   .then(function(){
     row("ok","Done. Read these results to Claude (or screenshot them). Test rows are marked ZZ-DIAG and will be cleaned from the sheet.");
     btn.disabled=false;btn.textContent="Run tests again";
