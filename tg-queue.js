@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716l";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716m";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -656,6 +656,79 @@
     fillPanel();
   }
   setInterval(function () { if (panelEl) fillPanel(); }, 3000);
+
+  /* ---------- plant queue-status marks (v-m) ----------
+     Raters had no way to see, when picking a plant, whether it was already
+     submitted (Mason was manually cross-checking names/numbers). Every
+     rate-link gets a badge: ⬆ = in THIS phone's queue (stored, not yet
+     confirmed), ✓ = confirmed saved from THIS phone. rate.html additionally
+     shows a notice strip when its current SKU is already pending/saved. */
+  function skuFromHref(h) {
+    var i = String(h || '').indexOf('sku=');
+    if (i < 0) return null;
+    var s = String(h).slice(i + 4);
+    var amp = s.indexOf('&');
+    if (amp >= 0) s = s.slice(0, amp);
+    try { return decodeURIComponent(s); } catch (e) { return s; }
+  }
+  function decorateSkuLinks() {
+    allItems().then(function (res) {
+      var pending = {};
+      res.items.forEach(function (it) { pending[skuOf(it.body)] = true; });
+      var saved = {};
+      try {
+        JSON.parse(localStorage.getItem('tgSentLog') || '[]').forEach(function (r) { saved[r.sku] = true; });
+      } catch (e) {}
+      // badges on plant links
+      var links = document.querySelectorAll('a[href*="rate.html"]');
+      for (var i = 0; i < links.length; i++) {
+        var a = links[i];
+        var sku = skuFromHref(a.getAttribute('href'));
+        if (!sku) continue;
+        var mark = a.querySelector('.tgMark');
+        var want = pending[sku] ? '⬆' : (saved[sku] ? '✓' : '');
+        if (!want) { if (mark) mark.textContent = ''; continue; }
+        if (!mark) {
+          mark = document.createElement('span');
+          mark.className = 'tgMark';
+          mark.style.cssText = 'margin-left:6px;font-weight:800';
+          a.appendChild(mark);
+        }
+        mark.textContent = want;
+        mark.style.color = pending[sku] ? '#d97706' : '#16a34a';
+        mark.title = pending[sku] ? 'In upload queue on this phone' : 'Saved from this phone';
+      }
+      // notice strip on the rating form itself
+      if (/rate\.html/i.test(location.pathname)) {
+        var cur = null;
+        try { cur = new URLSearchParams(location.search).get('sku'); } catch (e) {}
+        var note = document.getElementById('tgSkuNote');
+        var txt = '', bg = '', fg = '';
+        if (cur && pending[cur]) {
+          txt = '⬆ ' + cur + ' is already in this phone\u2019s upload queue (stored, not yet confirmed). Submitting again adds a second rating.';
+          bg = '#2e2508'; fg = '#fde68a';
+        } else if (cur && saved[cur]) {
+          txt = '✓ ' + cur + ' was already rated & saved from this phone. Submitting again adds a second rating.';
+          bg = '#0f2a18'; fg = '#9fdf9f';
+        }
+        if (txt) {
+          if (!note) {
+            note = document.createElement('div');
+            note.id = 'tgSkuNote';
+            note.style.cssText = 'padding:8px 12px;font:600 13px/1.4 system-ui,-apple-system,sans-serif';
+            if (document.body) document.body.insertBefore(note, document.body.firstChild);
+          }
+          note.textContent = txt;
+          note.style.background = bg;
+          note.style.color = fg;
+        } else if (note) {
+          note.parentNode.removeChild(note);
+        }
+      }
+    }).catch(function () {});
+  }
+  setInterval(decorateSkuLinks, 3000);
+  setTimeout(decorateSkuLinks, 800);
 
   function updateBadge() {
     ensureBar();
