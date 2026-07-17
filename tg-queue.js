@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716o";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260717a";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -192,25 +192,50 @@
       img.src = du;
     });
   }
+  function photoRefs_(obj) {
+    // Accessors for every embedded photo, covering BOTH shapes: bare
+    // data:image strings AND rate.html's photos:[{name,data(raw base64)}].
+    var refs = [];
+    for (var k in obj) {
+      (function (key) {
+        var v = obj[key];
+        if (typeof v === 'string' && v.indexOf('data:image') === 0) {
+          refs.push({ get: function () { return obj[key]; },
+                      set: function (nd) { obj[key] = nd; } });
+        }
+      })(k);
+    }
+    if (obj.photos && obj.photos.length) {
+      obj.photos.forEach(function (p) {
+        if (p && typeof p.data === 'string' && p.data.length > 2000) {
+          refs.push({ get: function () { return 'data:image/jpeg;base64,' + p.data; },
+                      set: function (nd) { p.data = String(nd).split(',')[1] || ''; } });
+        }
+      });
+    }
+    return refs;
+  }
   function shrinkBodyToFit(item) {
     var obj; try { obj = JSON.parse(item.body); } catch (e) { return Promise.resolve(false); }
     if (!obj || typeof obj !== 'object') return Promise.resolve(false);
-    var key = null;
-    for (var k in obj) {
-      if (typeof obj[k] === 'string' && obj[k].indexOf('data:image') === 0) { key = k; break; }
-    }
-    if (!key) return Promise.resolve(false);
+    var refs = photoRefs_(obj);
+    if (!refs.length) return Promise.resolve(false);
     var steps = [[1200, 0.7], [900, 0.6], [640, 0.5]];
     var i = 0;
     function attempt() {
       if (i >= steps.length) return false;
       var st = steps[i++];
-      return shrinkDataUrl(obj[key], st[0], st[1]).then(function (nd) {
-        obj[key] = nd;
+      var ch = Promise.resolve();
+      refs.forEach(function (ref) {
+        ch = ch.then(function () {
+          return shrinkDataUrl(ref.get(), st[0], st[1]).then(function (nd) { ref.set(nd); }, function () {});
+        });
+      });
+      return ch.then(function () {
         var copy = { id: item.id, url: item.url, body: JSON.stringify(obj),
                      ts: item.ts, attempts: item.attempts || 0, shrunk: true };
         return lsPut(copy) ? true : attempt();
-      }, function () { return false; });
+      });
     }
     return Promise.resolve().then(attempt);
   }
@@ -240,15 +265,18 @@
         var it = L[i++];
         if (String(it.body || '').length <= cfg[2]) return next();
         var obj; try { obj = JSON.parse(it.body); } catch (e) { return next(); }
-        var key = null;
-        for (var k in obj) {
-          if (typeof obj[k] === 'string' && obj[k].indexOf('data:image') === 0) { key = k; break; }
-        }
-        if (!key) return next();
-        return shrinkDataUrl(obj[key], cfg[0], cfg[1]).then(function (nd) {
-          obj[key] = nd; it.body = JSON.stringify(obj); it.shrunk = true;
+        var refs = photoRefs_(obj);
+        if (!refs.length) return next();
+        var ch = Promise.resolve();
+        refs.forEach(function (ref) {
+          ch = ch.then(function () {
+            return shrinkDataUrl(ref.get(), cfg[0], cfg[1]).then(function (nd) { ref.set(nd); }, function () {});
+          });
+        });
+        return ch.then(function () {
+          it.body = JSON.stringify(obj); it.shrunk = true;
           return next();
-        }, function () { return next(); });
+        });
       }
       return next();
     }
@@ -311,11 +339,17 @@
     var bodyStr = typeof body === "string" ? body : "";
     var id = uuid();
     // Stamp a submissionId into the JSON payload (backend dedups on it).
+    // v20260717a: if the caller PRE-stamped one (split transport), respect it —
+    // the photo packet references the scores packet by this id.
     try {
       var obj = JSON.parse(bodyStr);
-      if (obj && typeof obj === "object") {
-        obj.submissionId = id;
-        bodyStr = JSON.stringify(obj);
+      if (obj && typeof obj === 'object') {
+        if (typeof obj.submissionId === 'string' && obj.submissionId.length >= 8) {
+          id = obj.submissionId;
+        } else {
+          obj.submissionId = id;
+          bodyStr = JSON.stringify(obj);
+        }
       }
     } catch (e) { /* not JSON — store as-is */ }
     var item = { id: id, url: url, body: bodyStr, ts: Date.now(), attempts: 0 };
@@ -344,6 +378,7 @@
               for (var k in o) {
                 if (typeof o[k] === 'string' && o[k].indexOf('data:image') === 0) { o[k] = ''; dropped = true; }
               }
+              if (o.photos && o.photos.length) { o.photos = []; dropped = true; }
               if (dropped) {
                 var lite = { id: item.id, url: item.url, body: JSON.stringify(o),
                              ts: item.ts, attempts: item.attempts || 0, shrunk: true, photoDropped: true };
@@ -502,14 +537,8 @@
                       (input && input.method) || "GET").toUpperCase();
         if (method === "POST" && ENDPOINT_RE.test(url)) {
           var body = init && init.body;
-          // CRITICAL: resolve only AFTER the submission is persisted to IndexedDB.
-          // The form does `await fetch(...)` then immediately redirects to the bed
-          // list; if we resolved before the async save committed, the navigation
-          // aborted the save and the rating was lost (never stored, never sent).
-          // Awaiting enqueue here makes the redirect wait for persistence; flush()
-          // then sends it, and the next page load re-flushes from IndexedDB, so a
-          // submission can never be dropped by the post-submit navigation.
-          return enqueue(url, body).then(function () {
+          var sendSingle = function (body) {
+            return enqueue(url, body).then(function () {
             flush();
             return new Response(null, { status: 202 });
           }).catch(function () {
@@ -557,6 +586,38 @@
               });
             });
           });
+          };
+          // v20260717a SPLIT TRANSPORT (rate.html only): scores travel as a ~1kB
+          // packet that survives any storage/network abuse; photos trail behind as
+          // separate packets keyed to the rating's submissionId and attach to the
+          // row server-side (backend v5 photoFor). Photo-only submissions (Beds
+          // 56 & 57) and packets without photos are NOT split.
+          try {
+            if (/rate\.html/i.test(location.pathname)) {
+              var sp = JSON.parse(typeof body === 'string' ? body : String(body));
+              var hasP = sp && sp.photos && sp.photos.length;
+              var hasS = sp && !(sp.VEG == null && sp.UNI == null && sp.FLO == null && sp.RES == null);
+              if (sp && typeof sp === 'object' && hasP && hasS && !sp.photoFor) {
+                var sid2 = uuid(), pid2 = uuid();
+                var pArr = sp.photos;
+                sp.photos = []; sp.submissionId = sid2; sp.photosFollow = pArr.length;
+                var pp = { photoFor: sid2, sku: sp.sku, date: sp.date,
+                           photos: pArr, submissionId: pid2 };
+                return enqueue(url, JSON.stringify(sp)).then(function () {
+                  // photos are best-effort: scores must never be blocked by them
+                  return enqueue(url, JSON.stringify(pp)).catch(function () {
+                    toast('⚠ Photo could not be stored — rating is safe. Retake the photo later.');
+                  });
+                }).then(function () {
+                  flush();
+                  return new Response(null, { status: 202 });
+                }).catch(function () {
+                  return sendSingle(body); // split couldn't store — classic single packet
+                });
+              }
+            }
+          } catch (eSplit) { /* malformed body — fall through to single path */ }
+          return sendSingle(body);
         }
       } catch (e) { /* fall through to real fetch */ }
       return ORIG_FETCH(input, init);
