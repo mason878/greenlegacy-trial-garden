@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Upload Queue — Trial Garden</title>
+<script src="tg-queue.js?v=20260716k"></script>
+<style>
+  body{font:500 15px/1.5 system-ui,-apple-system,sans-serif;background:#141a14;color:#fff;margin:0;padding:50px 16px 24px}
+  h1{font-size:17px;margin:14px 0 6px;color:#cfe3cf}
+  .item{padding:8px 10px;border-bottom:1px solid #263226;word-break:break-word}
+  .pend{color:#fde68a}.done{color:#9fdf9f}.muted{color:#9fbf9f;padding:6px 10px}
+  .warn{color:#fca5a5;font-weight:700;padding:6px 10px}
+  button{border:0;border-radius:16px;padding:10px 16px;font:600 14px/1 system-ui,sans-serif;background:#3f7d46;color:#fff;margin:8px 8px 8px 0;cursor:pointer}
+  a.back{color:#9fdf9f;font-weight:600;margin-left:6px}
+</style>
+</head>
+<body>
+<h1>Upload queue</h1>
+<div>
+  <button id="send" type="button">⬆ Send now</button>
+  <a class="back" id="backlink" href="index.html">← Back to map</a>
+</div>
+<div id="pending"><div class="muted">Loading…</div></div>
+<h1>Saved to the sheet from this device</h1>
+<div id="saved"><div class="muted">Loading…</div></div>
+<script>
+function fmtAge(ms){var s=Math.max(1,Math.round(ms/1000));if(s<60)return s+"s";var m=Math.round(s/60);if(m<60)return m+"m";return (m/60).toFixed(1)+"h";}
+function skuFrom(body){try{var o=JSON.parse(body);if(o&&o.sku)return String(o.sku);}catch(e){}var m=String(body||"").match(/GL-\d{4}/);return m?m[0]:"(unknown)";}
+function render(){
+  var api=window.TGQueue||{};
+  var now=Date.now();
+  (api.allItems?api.allItems():Promise.resolve({items:[],idbOk:true})).then(function(res){
+    var el=document.getElementById("pending"); el.textContent="";
+    if(!res.idbOk){
+      var w=document.createElement("div"); w.className="warn";
+      w.textContent="⚠ Main storage unreadable — showing the backup copy. Close and reopen this browser to restore full capacity.";
+      el.appendChild(w);
+    }
+    var head=document.createElement("div"); head.className="muted";
+    head.textContent="Pending: "+res.items.length;
+    el.appendChild(head);
+    res.items.sort(function(a,b){return a.ts-b.ts;}).forEach(function(it){
+      var d=document.createElement("div"); d.className="item pend";
+      d.textContent="⬆ "+skuFrom(it.body)+" · queued "+fmtAge(now-it.ts)+" ago · "+
+        (it.lastSent?("last try "+fmtAge(now-it.lastSent)+" ago"):"not tried yet")+
+        " · "+Math.max(1,Math.round(String(it.body||"").length/1024))+"kB"+
+        (it.shrunk?" · photo shrunk to fit":"");
+      el.appendChild(d);
+    });
+  });
+  var L=(window.TGQueue&&window.TGQueue.sentLog)?window.TGQueue.sentLog():[];
+  var sv=document.getElementById("saved"); sv.textContent="";
+  if(!L.length){var d0=document.createElement("div");d0.className="muted";d0.textContent="— none confirmed yet on this device —";sv.appendChild(d0);}
+  L.slice(0,200).forEach(function(r){
+    var d=document.createElement("div"); d.className="item done";
+    d.textContent="✓ "+r.sku+" · rated "+fmtAge(now-r.ts)+" ago · confirmed "+fmtAge(now-r.ct)+" ago";
+    sv.appendChild(d);
+  });
+}
+document.getElementById("send").addEventListener("click",function(){
+  var b=this; b.textContent="…";
+  if(window.TGQueue&&window.TGQueue.forceSend) window.TGQueue.forceSend();
+  setTimeout(function(){ b.textContent="⬆ Send now"; render(); },2500);
+});
+// keep ?bed= context on the back link if present
+try{var u=new URLSearchParams(location.search);var bed=u.get("bed");if(bed)document.getElementById("backlink").href="index.html?bed="+encodeURIComponent(bed);}catch(e){}
+setInterval(render,3000); render();
+</script>
+</body>
+</html>
