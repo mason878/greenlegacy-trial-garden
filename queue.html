@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Upload Queue — Trial Garden</title>
-<script src="tg-queue.js?v=20260716k"></script>
+<script src="tg-queue.js?v=20260716l"></script>
 <style>
   body{font:500 15px/1.5 system-ui,-apple-system,sans-serif;background:#141a14;color:#fff;margin:0;padding:50px 16px 24px}
   h1{font-size:17px;margin:14px 0 6px;color:#cfe3cf}
@@ -52,11 +52,23 @@ function render(){
   var L=(window.TGQueue&&window.TGQueue.sentLog)?window.TGQueue.sentLog():[];
   var sv=document.getElementById("saved"); sv.textContent="";
   if(!L.length){var d0=document.createElement("div");d0.className="muted";d0.textContent="— none confirmed yet on this device —";sv.appendChild(d0);}
-  L.slice(0,200).forEach(function(r){
-    var d=document.createElement("div"); d.className="item done";
-    d.textContent="✓ "+r.sku+" · rated "+fmtAge(now-r.ts)+" ago · confirmed "+fmtAge(now-r.ct)+" ago";
-    sv.appendChild(d);
-  });
+  else{
+    var head=document.createElement("div"); head.className="muted";
+    head.textContent="✓ "+L.length+" confirmed from this device"+(L.length>10&&!window.__showAllSaved?" · showing latest 10":"");
+    sv.appendChild(head);
+    L.slice(0, window.__showAllSaved?200:10).forEach(function(r){
+      var d=document.createElement("div"); d.className="item done";
+      d.textContent="✓ "+r.sku+" · rated "+fmtAge(now-r.ts)+" ago · confirmed "+fmtAge(now-r.ct)+" ago";
+      sv.appendChild(d);
+    });
+    if(L.length>10){
+      var tog=document.createElement("button"); tog.type="button";
+      tog.textContent=window.__showAllSaved?"Show less":"Show all ("+L.length+")";
+      tog.style.background="#444";
+      tog.addEventListener("click",function(){window.__showAllSaved=!window.__showAllSaved;render();});
+      sv.appendChild(tog);
+    }
+  }
 }
 document.getElementById("send").addEventListener("click",function(){
   var b=this; b.textContent="…";
