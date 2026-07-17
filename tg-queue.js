@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716m";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716n";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -909,6 +909,19 @@
   setInterval(checkVersion, 60000);
 
   // Expose a tiny API for manual use / debugging.
+  /* ---------- persistent storage request (v-n) ----------
+     Formally asks the browser to protect this origin's IndexedDB/localStorage
+     from eviction under storage pressure. Best-effort — iOS grants it
+     silently for sites used often; every bit of protection helps the queue
+     survive camera-heavy sessions. */
+  try {
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist().then(function (granted) {
+        try { window.TGQueue && (window.TGQueue.persisted = !!granted); } catch (e) {}
+      }).catch(function () {});
+    }
+  } catch (e) {}
+
   window.TGQueue = {
     flush: flush, pending: getAll, version: TG_VERSION,
     allItems: allItems,
