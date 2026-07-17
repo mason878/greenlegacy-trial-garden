@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716j";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716k";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -131,13 +131,60 @@
       L.push(item);
       var total = 0;
       for (var i = 0; i < L.length; i++) total += String(L[i].body || '').length;
-      if (total > 3500000) return false; // over LS budget — IDB only
+      if (total > 4500000) return false; // over LS budget — IDB only (v-k: raised from 3.5MB)
       return lsWrite(L);
     } catch (e) { return false; }
   }
   function lsDel(id) {
     try { lsWrite(lsAll().filter(function (x) { return x && x.id !== id; })); } catch (e) {}
   }
+  /* ---------- photo shrink-to-fit (v-k) ----------
+     localStorage has a hard ~5MB quota — with full-size photos the mirror
+     capped out at ~7 items and the 8th hit "storage error" when IndexedDB
+     was also dead. If an item won't fit, progressively recompress its photo
+     (1200px/0.7 → 900/0.6 → 640/0.5) until the LS copy fits. IndexedDB (when
+     alive) keeps the full-quality original; the shrunk copy only gets sent
+     if IDB is gone — a smaller photo beats a lost rating. */
+  function shrinkDataUrl(du, maxPx, q) {
+    return new Promise(function (res, rej) {
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var w = img.width, h = img.height, sc = Math.min(1, maxPx / Math.max(w, h));
+          var c = document.createElement('canvas');
+          c.width = Math.max(1, Math.round(w * sc));
+          c.height = Math.max(1, Math.round(h * sc));
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          res(c.toDataURL('image/jpeg', q));
+        } catch (e) { rej(e); }
+      };
+      img.onerror = rej;
+      img.src = du;
+    });
+  }
+  function shrinkBodyToFit(item) {
+    var obj; try { obj = JSON.parse(item.body); } catch (e) { return Promise.resolve(false); }
+    if (!obj || typeof obj !== 'object') return Promise.resolve(false);
+    var key = null;
+    for (var k in obj) {
+      if (typeof obj[k] === 'string' && obj[k].indexOf('data:image') === 0) { key = k; break; }
+    }
+    if (!key) return Promise.resolve(false);
+    var steps = [[1200, 0.7], [900, 0.6], [640, 0.5]];
+    var i = 0;
+    function attempt() {
+      if (i >= steps.length) return false;
+      var st = steps[i++];
+      return shrinkDataUrl(obj[key], st[0], st[1]).then(function (nd) {
+        obj[key] = nd;
+        var copy = { id: item.id, url: item.url, body: JSON.stringify(obj),
+                     ts: item.ts, attempts: item.attempts || 0, shrunk: true };
+        return lsPut(copy) ? true : attempt();
+      }, function () { return false; });
+    }
+    return Promise.resolve().then(attempt);
+  }
+
   // Union of both stores. idbOk=false means IndexedDB itself is unreadable
   // (items may still come from the LS mirror). Never rejects.
   function allItems() {
@@ -209,15 +256,20 @@
     // iOS killing or swapping IndexedDB), then IndexedDB. The submission is
     // safe (and the form may redirect) if EITHER store holds it.
     var lsOk = lsPut(item);
-    return putItem(item).catch(function () {
-      dbPromise = null;
-      return putItem(item);
-    }).then(function () {
-      storageFailed = false;
-      updateBadge();
-    }, function (err) {
-      if (lsOk) { storageFailed = false; updateBadge(); return; }
-      throw err; // BOTH stores failed — caller falls back to direct-send+confirm
+    // v-k: if the full-size item won't fit in the LS mirror, shrink its photo
+    // until it does (IDB still gets the full-quality original below).
+    var lsHeldP = lsOk ? Promise.resolve(true) : shrinkBodyToFit(item).catch(function () { return false; });
+    return lsHeldP.then(function (lsHeld) {
+      return putItem(item).catch(function () {
+        dbPromise = null;
+        return putItem(item);
+      }).then(function () {
+        storageFailed = false;
+        updateBadge();
+      }, function (err) {
+        if (lsHeld) { storageFailed = false; updateBadge(); return; }
+        throw err; // NO store holds it — caller falls back to direct-send+confirm
+      });
     });
   }
 
@@ -543,6 +595,11 @@
       cls.style.cssText = 'margin:10px 0 0 8px;border:0;border-radius:16px;padding:8px 14px;font:600 13px/1 system-ui,sans-serif;background:#444;color:#fff';
       cls.addEventListener('click', togglePanel);
       el.appendChild(cls);
+      var qlink = document.createElement('a');
+      qlink.href = 'queue.html?cb=' + TG_VERSION;
+      qlink.textContent = 'Open full queue page →';
+      qlink.style.cssText = 'display:inline-block;margin:10px 0 0 12px;color:#9fdf9f;font:600 13px/1 system-ui,sans-serif';
+      el.appendChild(qlink);
     });
   }
   function togglePanel() {
@@ -736,6 +793,13 @@
   // Expose a tiny API for manual use / debugging.
   window.TGQueue = {
     flush: flush, pending: getAll, version: TG_VERSION,
+    allItems: allItems,
+    sentLog: function () { try { return JSON.parse(localStorage.getItem('tgSentLog') || '[]'); } catch (e) { return []; } },
+    forceSend: function () {
+      return allItems().then(function (res) {
+        return Promise.all(res.items.map(function (it) { it.lastSent = 0; lsPut(it); return putItem(it).catch(function () {}); }));
+      }).catch(function () {}).then(function () { flushing = false; flush(); });
+    },
     checkVersion: checkVersion, ping: pingEndpoint,
     health: function () { return { endpointBase: endpointBase, endpointOk: endpointOk }; }
   };
