@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<script src="tg-queue.js?v=20260716m"></script>
+<script src="tg-queue.js?v=20260716n"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Trial Garden Rating</title>
@@ -202,7 +202,7 @@ async function loadLast(){
 function compressPhoto(f){return new Promise(res=>{
   const img=new Image(),url=URL.createObjectURL(f);
   img.onload=()=>{
-    const MAX=1600,s=Math.min(1,MAX/Math.max(img.width,img.height));
+    const MAX=1200 /* v-n: was 1600 — halves payloads for faster field uploads */,s=Math.min(1,MAX/Math.max(img.width,img.height));
     const c=document.createElement("canvas");
     c.width=Math.round(img.width*s);c.height=Math.round(img.height*s);
     c.getContext("2d").drawImage(img,0,0,c.width,c.height);
