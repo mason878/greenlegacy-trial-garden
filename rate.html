@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<script src="tg-queue.js?v=20260717a"></script>
+<script src="tg-queue.js?v=20260717b"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Trial Garden Rating</title>
@@ -207,7 +207,9 @@ function compressPhoto(f){return new Promise(res=>{
     c.width=Math.round(img.width*s);c.height=Math.round(img.height*s);
     c.getContext("2d").drawImage(img,0,0,c.width,c.height);
     URL.revokeObjectURL(url);
-    res(c.toDataURL("image/jpeg",.72).split(",")[1]);
+    let du=c.toDataURL("image/webp",.75), type="image/webp"; /* v-717b: WebP ~30% smaller at equal quality */
+    if(du.indexOf("data:image/webp")!==0){ du=c.toDataURL("image/jpeg",.72); type="image/jpeg"; } /* Safari fallback */
+    res({data:du.split(",")[1], type:type});
   };
   img.src=url;
 });}
@@ -224,7 +226,7 @@ async function submit(){
     notes:document.getElementById("note").value
   };
   try{
-    payload.photos=await Promise.all(photos.map(async p=>({name:p.file.name,data:await compressPhoto(p.file)})));
+    payload.photos=await Promise.all(photos.map(async p=>{const cp=await compressPhoto(p.file);return {name:String(p.file.name||"photo").replace(/\.[^.]+$/,"")+(cp.type==="image/webp"?".webp":".jpg"),data:cp.data,type:cp.type};}));
   }catch(e){payload.photos=[];}
   if(ENDPOINT){
     fetch(ENDPOINT,{method:"POST",body:JSON.stringify(payload),
