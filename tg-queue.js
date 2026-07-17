@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260717a";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260717b";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -208,8 +208,8 @@
     if (obj.photos && obj.photos.length) {
       obj.photos.forEach(function (p) {
         if (p && typeof p.data === 'string' && p.data.length > 2000) {
-          refs.push({ get: function () { return 'data:image/jpeg;base64,' + p.data; },
-                      set: function (nd) { p.data = String(nd).split(',')[1] || ''; } });
+          refs.push({ get: function () { return 'data:image/' + ((p.type||'').indexOf('webp')>=0?'webp':'jpeg') + ';base64,' + p.data; },
+                      set: function (nd) { p.data = String(nd).split(',')[1] || ''; p.type = 'image/jpeg'; /* shrink re-encodes as JPEG — retag (v-717b) */ } });
         }
       });
     }
