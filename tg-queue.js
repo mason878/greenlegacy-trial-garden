@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716k";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716l";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -185,6 +185,46 @@
     return Promise.resolve().then(attempt);
   }
 
+  /* ---------- mirror compaction (v-l) ----------
+     v-k only shrank the INCOMING item — with ~12 full-size photos already in
+     the mirror there was no room left, so item 13 was refused even shrunk
+     (field cap Mason hit). When the mirror is full, recompress EVERY stored
+     copy (pass 1: >150kB → 900px/0.6; pass 2: >80kB → 640px/0.5) to make
+     room. Raises worst-case dead-IDB capacity to ~50 items. */
+  function compactLS() {
+    var L = lsAll();
+    if (!L.length) return Promise.resolve(false);
+    var passes = [[900, 0.6, 150000], [640, 0.5, 80000]];
+    var p = 0;
+    function pass() {
+      if (p >= passes.length) return Promise.resolve(lsWrite(L));
+      var cfg = passes[p++];
+      var i = 0;
+      function next() {
+        if (i >= L.length) {
+          var total = 0;
+          for (var t = 0; t < L.length; t++) total += String(L[t].body || '').length;
+          if (total <= 4000000) return Promise.resolve(lsWrite(L));
+          return pass();
+        }
+        var it = L[i++];
+        if (String(it.body || '').length <= cfg[2]) return next();
+        var obj; try { obj = JSON.parse(it.body); } catch (e) { return next(); }
+        var key = null;
+        for (var k in obj) {
+          if (typeof obj[k] === 'string' && obj[k].indexOf('data:image') === 0) { key = k; break; }
+        }
+        if (!key) return next();
+        return shrinkDataUrl(obj[key], cfg[0], cfg[1]).then(function (nd) {
+          obj[key] = nd; it.body = JSON.stringify(obj); it.shrunk = true;
+          return next();
+        }, function () { return next(); });
+      }
+      return next();
+    }
+    return pass();
+  }
+
   // Union of both stores. idbOk=false means IndexedDB itself is unreadable
   // (items may still come from the LS mirror). Never rejects.
   function allItems() {
@@ -256,9 +296,11 @@
     // iOS killing or swapping IndexedDB), then IndexedDB. The submission is
     // safe (and the form may redirect) if EITHER store holds it.
     var lsOk = lsPut(item);
-    // v-k: if the full-size item won't fit in the LS mirror, shrink its photo
-    // until it does (IDB still gets the full-quality original below).
-    var lsHeldP = lsOk ? Promise.resolve(true) : shrinkBodyToFit(item).catch(function () { return false; });
+    // v-l: LS full? First COMPACT the existing mirror (recompress every stored
+    // photo), retry the full item, then shrink just this item as last resort.
+    var lsHeldP = lsOk ? Promise.resolve(true)
+      : compactLS().then(function () { return lsPut(item) ? true : shrinkBodyToFit(item); })
+          .catch(function () { return false; });
     return lsHeldP.then(function (lsHeld) {
       return putItem(item).catch(function () {
         dbPromise = null;
@@ -451,12 +493,15 @@
                 return tfetch(dsBase + '?action=check&id=' + encodeURIComponent(dsid), { method: 'GET' }, 12000)
                   .then(function (r) { return r.json(); })
                   .then(function (js) {
-                    if (js && js.saved) return new Response(null, { status: 202 });
+                    if (js && js.saved) { try { logConfirmed({ body: sendBody, ts: Date.now() }); } catch (eL) {} return new Response(null, { status: 202 }); }
                     if (tries >= 4) throw new Error('save unconfirmed');
                     return new Promise(function (rs) { setTimeout(rs, 4000); }).then(poll);
                   });
               }
-              return poll();
+              return poll().catch(function (ePoll) {
+                try { alert('⚠ RATING NOT SAVED — this phone has no working storage and the server could not confirm the save. Get signal and SUBMIT THIS PLANT AGAIN.'); } catch (eA) {}
+                throw ePoll;
+              });
             });
           });
         }
