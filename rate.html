@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<script src="tg-queue.js?v=20260717b"></script>
+<script src="tg-queue.js?v=20260717c"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Trial Garden Rating</title>
@@ -236,9 +236,19 @@ async function submit(){
   }
   toast("✓ "+id+" saved"+(avg?"\nAvg "+avg:""),0);
   setTimeout(()=>{
-    window.location.href='index.html?bed='+encodeURIComponent(rec.loc);
-  },1400);
+    window.location.replace("index.html?bed="+encodeURIComponent(rec.loc)+"\u0026r="+Date.now()); // v-717c: hard reload -> fresh marks/counts, no stale cache
+  },800);
 }
+</script>
+<script>
+// v-717c: escape hatch — the rating page used to trap you until you submitted.
+try{
+  var bb=document.createElement("a");
+  bb.href=(typeof rec!=="undefined"&&rec&&rec.loc)?("index.html?bed="+encodeURIComponent(rec.loc)):"index.html";
+  bb.textContent="\u2190 Back";
+  bb.style.cssText="position:fixed;left:10px;bottom:14px;z-index:2147483000;background:#243024;color:#fff;font:700 15px/1 system-ui,-apple-system,sans-serif;padding:14px 18px;border-radius:24px;box-shadow:0 2px 10px rgba(0,0,0,.45);text-decoration:none";
+  document.body.appendChild(bb);
+}catch(e){}
 </script>
 </body>
 </html>
