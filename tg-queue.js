@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260716n";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260716o";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -98,6 +98,36 @@
 
   function putItem(item) {
     return idbOp("readwrite", function (st) { return st.put(item); });
+  }
+
+  /* ---------- no-hang helpers (v-o) ----------
+     iOS IndexedDB doesn't just reject after camera/background abuse — it can
+     HANG (neither resolve nor reject). A hung put froze the whole submit with
+     no error, no alert, no queue increment: the invisible-loss Mason described
+     ("count stops ascending → those are gone"). Every storage wait now has a
+     hard timeout, and timedPut NEVER rejects — it reports true/false. */
+  function timedPut(item, ms) {
+    return Promise.race([
+      putItem(item).then(function () { return true; }, function () { return false; }),
+      new Promise(function (rs) { setTimeout(function () { rs(false); }, ms || 2500); })
+    ]);
+  }
+  function timedVal(p, ms, fallback) {
+    return Promise.race([
+      Promise.resolve(p).catch(function () { return fallback; }),
+      new Promise(function (rs) { setTimeout(function () { rs(fallback); }, ms); })
+    ]);
+  }
+  function toast(msg, ms) {
+    try {
+      var t = document.createElement('div');
+      t.textContent = msg;
+      t.style.cssText = 'position:fixed;left:8px;right:8px;bottom:14px;z-index:2147483647;' +
+        'background:#7a1d1d;color:#fff;font:700 14px/1.4 system-ui,-apple-system,sans-serif;' +
+        'padding:12px 14px;border-radius:10px;box-shadow:0 4px 14px rgba(0,0,0,.5);text-align:center';
+      (document.body || document.documentElement).appendChild(t);
+      setTimeout(function () { try { t.parentNode.removeChild(t); } catch (e) {} }, ms || 4000);
+    } catch (e) {}
   }
 
   function deleteItem(id) {
@@ -296,21 +326,44 @@
     // iOS killing or swapping IndexedDB), then IndexedDB. The submission is
     // safe (and the form may redirect) if EITHER store holds it.
     var lsOk = lsPut(item);
-    // v-l: LS full? First COMPACT the existing mirror (recompress every stored
-    // photo), retry the full item, then shrink just this item as last resort.
+    // v-o: every stage is timeout-raced — a wedged compressor or dead IDB can
+    // slow a submit, never hang it. Chain: full item in LS → compact mirror &
+    // retry → shrink this item's photo → LAST RESORT: strip the photo and
+    // save the scores (a ~1kB record ALWAYS fits — data loss impossible,
+    // worst case is a lost photo, loudly flagged).
     var lsHeldP = lsOk ? Promise.resolve(true)
-      : compactLS().then(function () { return lsPut(item) ? true : shrinkBodyToFit(item); })
-          .catch(function () { return false; });
+      : timedVal(compactLS(), 6000, false).then(function () {
+          if (lsPut(item)) return true;
+          return timedVal(shrinkBodyToFit(item), 6000, false);
+        }).then(function (held) {
+          if (held) return true;
+          try {
+            var o = JSON.parse(item.body);
+            if (o && typeof o === 'object') {
+              var dropped = false;
+              for (var k in o) {
+                if (typeof o[k] === 'string' && o[k].indexOf('data:image') === 0) { o[k] = ''; dropped = true; }
+              }
+              if (dropped) {
+                var lite = { id: item.id, url: item.url, body: JSON.stringify(o),
+                             ts: item.ts, attempts: item.attempts || 0, shrunk: true, photoDropped: true };
+                if (lsPut(lite)) {
+                  toast('⚠ Photo dropped to save this rating — scores are safe. Retake the photo later.');
+                  return 'lite';
+                }
+              }
+            }
+          } catch (e) {}
+          return false;
+        });
     return lsHeldP.then(function (lsHeld) {
-      return putItem(item).catch(function () {
+      return timedPut(item, 2500).then(function (ok1) {
+        if (ok1) { storageFailed = false; updateBadge(); return; }
         dbPromise = null;
-        return putItem(item);
-      }).then(function () {
-        storageFailed = false;
-        updateBadge();
-      }, function (err) {
-        if (lsHeld) { storageFailed = false; updateBadge(); return; }
-        throw err; // NO store holds it — caller falls back to direct-send+confirm
+        return timedPut(item, 2500).then(function (ok2) {
+          if (ok2 || lsHeld) { storageFailed = false; updateBadge(); return; }
+          throw new Error('no storage'); // caller falls back to direct-send+confirm (+alert)
+        });
       });
     });
   }
@@ -394,7 +447,7 @@
             if (item.lastSent && (now - item.lastSent) < RESEND_MS) return;
             item.lastSent = now;
             lsPut(item); // keep LS mirror in sync (works even when IDB is dead)
-            return putItem(item).catch(function () {}).then(function () {
+            return timedPut(item, 2500).then(function () {
               // 30s cap per item: a slow/jammed item gets skipped this cycle
               // (kept + retried later) instead of blocking everything behind it.
               return tfetch(item.url, {
