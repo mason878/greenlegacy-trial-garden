@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260717b";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260717c";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -118,12 +118,12 @@
       new Promise(function (rs) { setTimeout(function () { rs(fallback); }, ms); })
     ]);
   }
-  function toast(msg, ms) {
+  function toast(msg, ms, bg) {
     try {
       var t = document.createElement('div');
       t.textContent = msg;
       t.style.cssText = 'position:fixed;left:8px;right:8px;bottom:14px;z-index:2147483647;' +
-        'background:#7a1d1d;color:#fff;font:700 14px/1.4 system-ui,-apple-system,sans-serif;' +
+        'background:' + (bg || '#7a1d1d') + ';color:#fff;font:700 14px/1.4 system-ui,-apple-system,sans-serif;' +
         'padding:12px 14px;border-radius:10px;box-shadow:0 4px 14px rgba(0,0,0,.5);text-align:center';
       (document.body || document.documentElement).appendChild(t);
       setTimeout(function () { try { t.parentNode.removeChild(t); } catch (e) {} }, ms || 4000);
@@ -597,6 +597,26 @@
               var sp = JSON.parse(typeof body === 'string' ? body : String(body));
               var hasP = sp && sp.photos && sp.photos.length;
               var hasS = sp && !(sp.VEG == null && sp.UNI == null && sp.FLO == null && sp.RES == null);
+              if (sp && typeof sp === 'object' && hasP && !hasS && !sp.photoFor) {
+                // v-717c PHOTO-LATER: photo-only submission for a sku THIS device
+                // already saved a rating for → attach to that row, no new row.
+                var prior = null;
+                try {
+                  var LOG = JSON.parse(localStorage.getItem('tgSentLog') || '[]');
+                  for (var li = 0; li < LOG.length; li++) {
+                    if (LOG[li] && LOG[li].sku === sp.sku && LOG[li].id && !LOG[li].ph) { prior = LOG[li]; break; }
+                  }
+                } catch (eL2) {}
+                if (prior) {
+                  var pp3 = { photoFor: prior.id, sku: sp.sku, date: sp.date,
+                              photos: sp.photos, submissionId: uuid() };
+                  return enqueue(url, JSON.stringify(pp3)).then(function () {
+                    flush();
+                    try { toast('📷 Photos will attach to your earlier ' + sp.sku + ' rating.', 3500, '#1d4a2a'); } catch (eT) {}
+                    return new Response(null, { status: 202 });
+                  }).catch(function () { return sendSingle(body); });
+                }
+              }
               if (sp && typeof sp === 'object' && hasP && hasS && !sp.photoFor) {
                 var sid2 = uuid(), pid2 = uuid();
                 var pArr = sp.photos;
@@ -632,7 +652,8 @@
     try {
       var st = document.createElement("style");
       st.textContent = "body{padding-top:38px!important}header{top:38px!important}" +
-        ".phead{top:38px!important}" + // bed-panel sticky header (its X was hidden under the bar when scrolled)
+        '#panel{top:38px!important;bottom:0!important;max-height:none!important;border-radius:0!important}' + // v-717c: bed panel = solid full screen below the bar (was a floaty bottom sheet)
+        '.phead{top:0!important}.phead .x{font-size:30px!important;padding:2px 12px!important}' + // header sticks to panel top; bigger close target
         "@keyframes tgpulse{0%,100%{opacity:1}50%{opacity:.5}}";
       (document.head || document.documentElement).appendChild(st);
     } catch (e) {}
@@ -691,7 +712,8 @@
   function logConfirmed(item) {
     try {
       var L = JSON.parse(localStorage.getItem('tgSentLog') || '[]');
-      L.unshift({ sku: skuOf(item.body), ts: item.ts, ct: Date.now() });
+      var isPh = String(item.body || '').indexOf('"photoFor"') >= 0 ? 1 : 0;
+      L.unshift({ sku: skuOf(item.body), ts: item.ts, ct: Date.now(), id: item.id, ph: isPh });
       localStorage.setItem('tgSentLog', JSON.stringify(L.slice(0, 50)));
     } catch (e) {}
   }
