@@ -1,5 +1,5 @@
 /* photoup.js - Green Legacy Trial Garden rating form
-Upload-at-capture photo handling. Version 20260819c
+Upload-at-capture photo handling. Version 20260819d
 
 WHY THIS EXISTS
 Photos used to ride inside the rating payload: base64 into JSON, parked in
@@ -26,7 +26,7 @@ tag and the form reverts to its previous behaviour.
 (function () {
  "use strict";
 
- var PU_VERSION = "20260819c";
+ var PU_VERSION = "20260819d";
  if (String(location.pathname).toLowerCase().indexOf("rate.html") < 0) return;
 
  // endpoint: read from the page at runtime, no token hardcoded here
@@ -95,8 +95,8 @@ tag and the form reverts to its previous behaviour.
    tries++;
    return getJSON(url, 15000).then(function (j) {
     if (j && j.saved) { p.status = "ok"; paint(); return true; }
-    if (tries >= 5) throw new Error("unconfirmed");
-    return new Promise(function (r) { setTimeout(r, 2500); }).then(poll);
+    if (tries >= 20) throw new Error("unconfirmed");
+    return new Promise(function (r) { setTimeout(r, 3000); }).then(poll);
    });
   }
   return poll();
