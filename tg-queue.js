@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260818a";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260819a";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -295,7 +295,7 @@
       function () { return { idbOk: false, idb: [] }; }
     );
     var idbTimeout = new Promise(function (rs) {
-      setTimeout(function () { rs({ idbOk: false, idb: [] }); }, 10000);
+      setTimeout(function () { rs({ idbOk: false, idb: [] }); }, 3000);
     });
     return Promise.race([idbRead, idbTimeout]).then(function (r) {
       var seen = {}, out = [];
@@ -891,7 +891,7 @@
     }
     return allItems().then(function (res) {
       var items = res.items;
-      if (!res.idbOk && !res.items.length) {
+      if (!res.idbOk) {
         dotEl.style.background = '#ef4444'; connTextEl.textContent = 'Storage glitch';
         queueEl.style.color = '#fca5a5';
         queueEl.textContent = items.length ? ('⚠ ' + items.length + ' to upload — close & reopen this page') : '⚠ Storage glitch — tap Refresh';
