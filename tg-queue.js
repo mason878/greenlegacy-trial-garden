@@ -42,7 +42,7 @@
   var sending = {};              // ids currently in-flight on this page
   var dbPromise = null;
   var lastN = 0;
-  var TG_VERSION = "20260819a";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
+  var TG_VERSION = "20260819b";  // bump on every JS deploy; must match the ?v= in the HTML <script> includes
   var storageFailed = false;     // set when IndexedDB writes fail even after retry (iOS stale-handle)
   var updateAvailable = false;
   var BOOT_TS = Date.now();      // used to allow auto-reload only right after the page opens
@@ -158,7 +158,7 @@
   function lsPut(item) {
     try {
       var L = lsAll().filter(function (x) { return x && x.id !== item.id; });
-      L.push(item);
+      var __m=(function(it){try{var o=JSON.parse(it.body);if(!o||typeof o!=='object')return it;if(o.photoFor)return null;var had=false;for(var k in o){if(typeof o[k]==='string'&&o[k].indexOf('data:image')===0){o[k]='';had=true;}}if(o.photos&&o.photos.length){o.photos=[];had=true;}if(!had)return it;return{id:it.id,url:it.url,body:JSON.stringify(o),ts:it.ts,attempts:it.attempts||0,lastSent:it.lastSent,shrunk:true,photoDropped:true,mirrorLite:true};}catch(e){return it;}})(item);if(__m===null)return true;L.push(__m);
       var total = 0;
       for (var i = 0; i < L.length; i++) total += String(L[i].body || '').length;
       if (total > 4500000) return false; // over LS budget — IDB only (v-k: raised from 3.5MB)
