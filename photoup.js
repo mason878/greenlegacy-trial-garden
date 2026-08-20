@@ -1,5 +1,5 @@
 /* photoup.js - Green Legacy Trial Garden rating form
-Upload-at-capture photo handling. Version 20260819d
+Upload-at-capture photo handling. Version 20260820a
 
 WHY THIS EXISTS
 Photos used to ride inside the rating payload: base64 into JSON, parked in
@@ -26,7 +26,7 @@ tag and the form reverts to its previous behaviour.
 (function () {
  "use strict";
 
- var PU_VERSION = "20260819d";
+ var PU_VERSION = "20260820a";
  if (String(location.pathname).toLowerCase().indexOf("rate.html") < 0) return;
 
  // endpoint: read from the page at runtime, no token hardcoded here
@@ -254,7 +254,85 @@ tag and the form reverts to its previous behaviour.
   };
  }
  hook();
- setInterval(hook, 1500);
+ setInterval(function () { hook(); layout(); }, 1500);
+// --- layout (Mason, 2026-08-20) ---
+ // Photos card is moved to the TOP of the form: adding an extra photo is the
+ // most common quick action, so it should be the first thing under the header.
+ // The notes card also gains an optional plant height in inches.
+ function layout() {
+  var wrap = document.querySelector(".wrap");
+  if (!wrap) return;
+  var pb = document.querySelector(".photo-btn");
+  var th = document.getElementById("thumbs");
+  if (pb && th && !document.getElementById("puCard")) {
+   var card = document.createElement("div");
+   card.className = "card";
+   card.id = "puCard";
+   var h2 = document.createElement("h2");
+   h2.textContent = "Photos";
+   card.appendChild(h2);
+   var hint = document.createElement("p");
+   hint.className = "hint";
+   hint.textContent = "Uploads the moment you take it - wait for the green check.";
+   card.appendChild(hint);
+   card.appendChild(pb);
+   card.appendChild(th);
+   wrap.insertBefore(card, wrap.firstChild);
+  }
+  var note = document.getElementById("note");
+  if (note && !document.getElementById("puHeight")) {
+   var lab = document.createElement("label");
+   lab.className = "fld";
+   lab.setAttribute("for", "puHeight");
+   lab.textContent = "Height in inches (optional)";
+   var inp = document.createElement("input");
+   inp.type = "number";
+   inp.id = "puHeight";
+   inp.step = "0.5";
+   inp.min = "0";
+   inp.setAttribute("inputmode", "decimal");
+   inp.placeholder = "e.g. 14.5";
+   note.parentNode.insertBefore(lab, note.nextSibling);
+   lab.parentNode.insertBefore(inp, lab.nextSibling);
+  }
+  var heads = document.querySelectorAll(".card h2");
+  for (var i = 0; i < heads.length; i++) {
+   if (heads[i].textContent.indexOf("Notes") === 0) heads[i].textContent = "Notes & Height";
+  }
+ }
+ function heightVal() {
+  var el = document.getElementById("puHeight");
+  if (!el) return null;
+  var v = String(el.value || "").trim();
+  if (v === "") return null;
+  var n = Number(v);
+  return (isFinite(n) && n >= 0) ? n : null;
+ }
+ // Outer fetch wrapper: photoup loads after tg-queue, so this runs FIRST and can
+ // stamp the height into the rating payload before tg-queue queues it. Photo
+ // uploads use XMLHttpRequest and are untouched by this.
+ var PREV_FETCH = window.fetch;
+ window.fetch = function (input, init) {
+  try {
+   var u = typeof input === "string" ? input : (input && input.url) || "";
+   var mth = ((init && init.method) || (input && input.method) || "GET").toUpperCase();
+   if (mth === "POST" && u.indexOf("script.google.com/macros/") >= 0 && init && typeof init.body === "string") {
+    var o = JSON.parse(init.body);
+    if (o && typeof o === "object" && !o.stagePhoto && !o.photoFor) {
+     var hv = heightVal();
+     if (hv !== null) {
+      o.heightIn = hv;
+      var ni = {};
+      for (var k in init) ni[k] = init[k];
+      ni.body = JSON.stringify(o);
+      init = ni;
+     }
+    }
+   }
+  } catch (e) {}
+  return PREV_FETCH.call(window, input, init);
+ };
+ layout();
  window.PhotoUp = {
   version: PU_VERSION,
   endpointFound: !!EP,
