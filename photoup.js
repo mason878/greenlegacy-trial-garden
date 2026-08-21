@@ -1,5 +1,5 @@
 /* photoup.js - Green Legacy Trial Garden rating form
-Upload-at-capture photo handling. Version 20260820a
+Upload-at-capture photo handling. Version 20260820b
 
 WHY THIS EXISTS
 Photos used to ride inside the rating payload: base64 into JSON, parked in
@@ -26,7 +26,7 @@ tag and the form reverts to its previous behaviour.
 (function () {
  "use strict";
 
- var PU_VERSION = "20260820a";
+ var PU_VERSION = "20260820b";
  if (String(location.pathname).toLowerCase().indexOf("rate.html") < 0) return;
 
  // endpoint: read from the page at runtime, no token hardcoded here
@@ -49,7 +49,7 @@ tag and the form reverts to its previous behaviour.
   return null;
  }
  var EP = findEndpoint();
- var SKU = String((new URLSearchParams(location.search)).get("sku") || "").toUpperCase().trim();
+ var CURSKU = String((new URLSearchParams(location.search)).get("sku") || "").toUpperCase().trim();
 
  // pics entries: id, thumb, data, type, status (up / ok / err), n
  var pics = [];
@@ -107,10 +107,10 @@ tag and the form reverts to its previous behaviour.
   var ext = isWebp(p.type) ? ".webp" : ".jpg";
   var body = JSON.stringify({
    stagePhoto: 1,
-   sku: SKU,
+   sku: CURSKU,
    date: new Date().toISOString(),
    submissionId: p.id,
-   photos: [{ name: SKU + "_" + Date.now() + "_" + (p.n || 1) + ext, data: p.data, type: p.type }]
+   photos: [{ name: CURSKU + "_" + Date.now() + "_" + (p.n || 1) + ext, data: p.data, type: p.type }]
   });
   return post(body)
   .then(function () { return confirmPhoto(p); })
@@ -333,10 +333,47 @@ tag and the form reverts to its previous behaviour.
   return PREV_FETCH.call(window, input, init);
  };
  layout();
+ // --- Bed 26 location fix (2026-08-20) ---
+ // rate.html's embedded plant data says "Bed 25" for all 59 plants that BOTH
+ // master_rows.json and the live map place in Bed 26. That sent raters back to
+ // Bed 25 after submitting and, worse, wrote "Bed 25" into the sheet's Location
+ // column. Mutating SKU[sku].loc fixes both at once, because the form's own
+ // `rec` is the very same object.
+ // Deliberately narrow: only a master value of exactly "Bed 26" is applied.
+ // master_rows.json is itself stale elsewhere (it has NO Bed 37S rows, so it
+ // would wrongly move GL-0697..0699), and the map still groups 54/55 under one
+ // combined "Beds 54 & 55" key. Those two cases are left alone on purpose and
+ // are tracked in the Project Hub for a proper data regeneration.
+ function fixLoc() {
+  var rec = null;
+  try { rec = (typeof SKU !== "undefined" && SKU) ? SKU[CURSKU] : null; } catch (e) { return; }
+  if (!rec) return;
+  var x = new XMLHttpRequest();
+  x.open("GET", "master_rows.json?cb=" + Date.now(), true);
+  x.timeout = 15000;
+  x.onload = function () {
+   try {
+    var a = JSON.parse(x.responseText);
+    a = Array.isArray(a) ? a : (a.rows || []);
+    for (var i = 1; i < a.length; i++) {
+     if (String(a[i][0]) !== CURSKU) continue;
+     var want = String(a[i][1]);
+     if (want === "Bed 26" && String(rec.loc) !== want) {
+      rec.loc = want;
+      var meta = document.querySelector("header .meta");
+      if (meta) meta.textContent = [want, rec.sup].filter(Boolean).join(" · ");
+     }
+     break;
+    }
+   } catch (e) {}
+  };
+  x.send();
+ }
+ fixLoc();
  window.PhotoUp = {
   version: PU_VERSION,
   endpointFound: !!EP,
-  sku: SKU,
+  sku: CURSKU,
   pics: function () {
    return pics.map(function (p) { return { id: p.id, status: p.status }; });
   },
